@@ -1,7 +1,6 @@
-use ruff_python_ast::{Arguments, Expr};
-
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -15,12 +14,12 @@ use crate::rules::pep8_naming::helpers;
 /// by underscores (also known as `snake_case`).
 ///
 /// > Function names should be lowercase, with words separated by underscores
-/// as necessary to improve readability.
+/// > as necessary to improve readability.
 /// >
 /// > Variable names follow the same convention as function names.
 /// >
 /// > mixedCase is allowed only in contexts where that’s already the
-/// prevailing style (e.g. threading.py), to retain backwards compatibility.
+/// > prevailing style (e.g. threading.py), to retain backwards compatibility.
 ///
 /// ## Example
 /// ```python
@@ -37,8 +36,8 @@ use crate::rules::pep8_naming::helpers;
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#function-and-method-arguments
-#[violation]
-pub struct MixedCaseVariableInClassScope {
+#[derive(ViolationMetadata)]
+pub(crate) struct MixedCaseVariableInClassScope {
     name: String,
 }
 
@@ -52,20 +51,11 @@ impl Violation for MixedCaseVariableInClassScope {
 
 /// N815
 pub(crate) fn mixed_case_variable_in_class_scope(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     name: &str,
-    arguments: Option<&Arguments>,
+    class_def: &ast::StmtClassDef,
 ) {
-    if checker
-        .settings
-        .pep8_naming
-        .ignore_names
-        .iter()
-        .any(|ignore_name| ignore_name.matches(name))
-    {
-        return;
-    }
     if !helpers::is_mixed_case(name) {
         return;
     }
@@ -73,12 +63,16 @@ pub(crate) fn mixed_case_variable_in_class_scope(
     let parent = checker.semantic().current_statement();
 
     if helpers::is_named_tuple_assignment(parent, checker.semantic())
-        || helpers::is_typed_dict_class(arguments, checker.semantic())
+        || helpers::is_typed_dict_class(class_def, checker.semantic())
     {
         return;
     }
 
-    checker.diagnostics.push(Diagnostic::new(
+    if checker.settings.pep8_naming.ignore_names.matches(name) {
+        return;
+    }
+
+    checker.report_diagnostic(Diagnostic::new(
         MixedCaseVariableInClassScope {
             name: name.to_string(),
         },

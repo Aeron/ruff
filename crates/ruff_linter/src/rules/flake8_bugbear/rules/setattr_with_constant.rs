@@ -2,7 +2,7 @@ use ruff_python_ast::{self as ast, Expr, ExprContext, Identifier, Stmt};
 use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_codegen::Generator;
 use ruff_python_stdlib::identifiers::{is_identifier, is_mangled_private};
 
@@ -30,16 +30,15 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: `setattr`](https://docs.python.org/3/library/functions.html#setattr)
-#[violation]
-pub struct SetAttrWithConstant;
+#[derive(ViolationMetadata)]
+pub(crate) struct SetAttrWithConstant;
 
 impl AlwaysFixableViolation for SetAttrWithConstant {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(
-            "Do not call `setattr` with a constant attribute value. It is not any safer than \
+        "Do not call `setattr` with a constant attribute value. It is not any safer than \
              normal property access."
-        )
+            .to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -62,18 +61,7 @@ fn assignment(obj: &Expr, name: &str, value: &Expr, generator: Generator) -> Str
 }
 
 /// B010
-pub(crate) fn setattr_with_constant(
-    checker: &mut Checker,
-    expr: &Expr,
-    func: &Expr,
-    args: &[Expr],
-) {
-    let Expr::Name(ast::ExprName { id, .. }) = func else {
-        return;
-    };
-    if id != "setattr" {
-        return;
-    }
+pub(crate) fn setattr_with_constant(checker: &Checker, expr: &Expr, func: &Expr, args: &[Expr]) {
     let [obj, name, value] = args else {
         return;
     };
@@ -83,13 +71,13 @@ pub(crate) fn setattr_with_constant(
     let Expr::StringLiteral(ast::ExprStringLiteral { value: name, .. }) = name else {
         return;
     };
-    if !is_identifier(name) {
+    if !is_identifier(name.to_str()) {
         return;
     }
-    if is_mangled_private(name) {
+    if is_mangled_private(name.to_str()) {
         return;
     }
-    if !checker.semantic().is_builtin("setattr") {
+    if !checker.semantic().match_builtin_expr(func, "setattr") {
         return;
     }
 
@@ -104,10 +92,10 @@ pub(crate) fn setattr_with_constant(
         if expr == child.as_ref() {
             let mut diagnostic = Diagnostic::new(SetAttrWithConstant, expr.range());
             diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
-                assignment(obj, name, value, checker.generator()),
+                assignment(obj, name.to_str(), value, checker.generator()),
                 expr.range(),
             )));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

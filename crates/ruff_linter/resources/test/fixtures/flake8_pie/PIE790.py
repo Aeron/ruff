@@ -207,3 +207,43 @@ class Repro:
     def stub(self) -> str:
         """Docstring"""
         ...
+
+
+class Repro(Protocol[int]):
+    def func(self) -> str:
+        """Docstring"""
+        ...
+
+    def impl(self) -> str:
+        """Docstring"""
+        return self.func()
+
+
+class Repro[int](Protocol):
+    def func(self) -> str:
+        """Docstring"""
+        ...
+
+    def impl(self) -> str:
+        """Docstring"""
+        return self.func()
+
+
+import typing
+
+if typing.TYPE_CHECKING:
+    def contains_meaningful_ellipsis() -> list[int]:
+        """Allow this in a TYPE_CHECKING block."""
+        ...
+
+# https://github.com/astral-sh/ruff/issues/12616
+class PotentialDocstring1:
+    pass
+    """
+    Lorem ipsum dolor sit amet.
+    """
+
+
+class PotentialDocstring2:
+    ...
+    'Lorem ipsum dolor sit amet.'

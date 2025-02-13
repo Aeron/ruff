@@ -2,7 +2,7 @@ use ruff_python_ast::{self as ast, Identifier, Stmt};
 use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::resolve_imported_module_path;
 use ruff_python_codegen::Generator;
 use ruff_python_stdlib::identifiers::is_identifier;
@@ -42,11 +42,11 @@ use crate::rules::flake8_tidy_imports::settings::Strictness;
 /// ```
 ///
 /// ## Options
-/// - `flake8-tidy-imports.ban-relative-imports`
+/// - `lint.flake8-tidy-imports.ban-relative-imports`
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#imports
-#[violation]
-pub struct RelativeImports {
+#[derive(ViolationMetadata)]
+pub(crate) struct RelativeImports {
     strictness: Strictness,
 }
 
@@ -56,8 +56,10 @@ impl Violation for RelativeImports {
     #[derive_message_formats]
     fn message(&self) -> String {
         match self.strictness {
-            Strictness::Parents => format!("Relative imports from parent modules are banned"),
-            Strictness::All => format!("Relative imports are banned"),
+            Strictness::Parents => {
+                "Prefer absolute imports over relative imports from parent modules".to_string()
+            }
+            Strictness::All => "Prefer absolute imports over relative imports".to_string(),
         }
     }
 
@@ -74,15 +76,13 @@ impl Violation for RelativeImports {
 
 fn fix_banned_relative_import(
     stmt: &Stmt,
-    level: Option<u32>,
+    level: u32,
     module: Option<&str>,
     module_path: Option<&[String]>,
     generator: Generator,
 ) -> Option<Fix> {
     // Only fix is the module path is known.
-    let Some(module_path) = resolve_imported_module_path(level, module, module_path) else {
-        return None;
-    };
+    let module_path = resolve_imported_module_path(level, module, module_path)?;
 
     // Require import to be a valid module:
     // https://python.org/dev/peps/pep-0008/#package-and-module-names
@@ -99,7 +99,7 @@ fn fix_banned_relative_import(
             TextRange::default(),
         )),
         names: names.clone(),
-        level: Some(0),
+        level: 0,
         range: TextRange::default(),
     };
     let content = generator.stmt(&node.into());
@@ -113,7 +113,7 @@ fn fix_banned_relative_import(
 pub(crate) fn banned_relative_import(
     checker: &Checker,
     stmt: &Stmt,
-    level: Option<u32>,
+    level: u32,
     module: Option<&str>,
     module_path: Option<&[String]>,
     strictness: Strictness,
@@ -122,7 +122,7 @@ pub(crate) fn banned_relative_import(
         Strictness::All => 0,
         Strictness::Parents => 1,
     };
-    if level? > strictness_level {
+    if level > strictness_level {
         let mut diagnostic = Diagnostic::new(RelativeImports { strictness }, stmt.range());
         if let Some(fix) =
             fix_banned_relative_import(stmt, level, module, module_path, checker.generator())

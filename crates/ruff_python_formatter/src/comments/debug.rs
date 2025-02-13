@@ -55,7 +55,11 @@ impl Debug for DebugComments<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
 
-        for node in self.comments.keys().sorted_by_key(|key| key.node().start()) {
+        for node in self
+            .comments
+            .keys()
+            .sorted_by_key(|key| (key.node().start(), key.node().end()))
+        {
             map.entry(
                 &NodeKindWithSource {
                     key: *node,
@@ -180,23 +184,23 @@ mod tests {
     use insta::assert_debug_snapshot;
 
     use ruff_formatter::SourceCode;
-    use ruff_python_ast::AnyNode;
+    use ruff_python_ast::AnyNodeRef;
     use ruff_python_ast::{StmtBreak, StmtContinue};
-    use ruff_python_trivia::CommentRanges;
+    use ruff_python_trivia::{CommentLinePosition, CommentRanges};
     use ruff_text_size::{TextRange, TextSize};
 
     use crate::comments::map::MultiMap;
-    use crate::comments::{CommentLinePosition, Comments, CommentsMap, SourceComment};
+    use crate::comments::{Comments, CommentsMap, SourceComment};
 
     #[test]
     fn debug() {
-        let continue_statement = AnyNode::from(StmtContinue {
-            range: TextRange::default(),
-        });
+        let continue_statement = StmtContinue {
+            range: TextRange::new(TextSize::new(18), TextSize::new(26)),
+        };
 
-        let break_statement = AnyNode::from(StmtBreak {
-            range: TextRange::default(),
-        });
+        let break_statement = StmtBreak {
+            range: TextRange::new(TextSize::new(55), TextSize::new(60)),
+        };
 
         let source = r"# leading comment
 continue; # trailing
@@ -209,7 +213,7 @@ break;
         let mut comments_map: CommentsMap = MultiMap::new();
 
         comments_map.push_leading(
-            continue_statement.as_ref().into(),
+            AnyNodeRef::from(&continue_statement).into(),
             SourceComment::new(
                 source_code.slice(TextRange::at(TextSize::new(0), TextSize::new(17))),
                 CommentLinePosition::OwnLine,
@@ -217,7 +221,7 @@ break;
         );
 
         comments_map.push_trailing(
-            continue_statement.as_ref().into(),
+            AnyNodeRef::from(&continue_statement).into(),
             SourceComment::new(
                 source_code.slice(TextRange::at(TextSize::new(28), TextSize::new(10))),
                 CommentLinePosition::EndOfLine,
@@ -225,7 +229,7 @@ break;
         );
 
         comments_map.push_leading(
-            break_statement.as_ref().into(),
+            AnyNodeRef::from(&break_statement).into(),
             SourceComment::new(
                 source_code.slice(TextRange::at(TextSize::new(39), TextSize::new(15))),
                 CommentLinePosition::OwnLine,

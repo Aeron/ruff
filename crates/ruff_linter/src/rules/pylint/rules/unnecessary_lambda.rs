@@ -1,6 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Applicability, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::contains_effect;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, visitor, Expr, ExprLambda, Parameter, ParameterWithDefault};
 use ruff_text_size::Ranged;
@@ -27,22 +26,30 @@ use crate::checkers::ast::Checker;
 /// ```
 ///
 /// ## Fix safety
-/// This rule's fix is marked as unsafe in cases in which the lambda body itself
-/// contains an effect.
+/// This rule's fix is marked as unsafe for two primary reasons.
+///
+/// First, the lambda body itself could contain an effect.
 ///
 /// For example, replacing `lambda x, y: (func()(x, y))` with `func()` would
 /// lead to a change in behavior, as `func()` would be evaluated eagerly when
 /// defining the lambda, rather than when the lambda is called.
 ///
-/// When the lambda body contains no visible effects, the fix is considered
-/// safe.
-#[violation]
-pub struct UnnecessaryLambda;
+/// However, even when the lambda body itself is pure, the lambda may
+/// change the argument names, which can lead to a change in behavior when
+/// callers pass arguments by name.
+///
+/// For example, replacing `foo = lambda x, y: func(x, y)` with `foo = func`,
+/// where `func` is defined as `def func(a, b): return a + b`, would be a
+/// breaking change for callers that execute the lambda by passing arguments by
+/// name, as in: `foo(x=1, y=2)`. Since `func` does not define the arguments
+/// `x` and `y`, unlike the lambda, the call would raise a `TypeError`.
+#[derive(ViolationMetadata)]
+pub(crate) struct UnnecessaryLambda;
 
 impl AlwaysFixableViolation for UnnecessaryLambda {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Lambda may be unnecessary; consider inlining inner function")
+        "Lambda may be unnecessary; consider inlining inner function".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -51,7 +58,7 @@ impl AlwaysFixableViolation for UnnecessaryLambda {
 }
 
 /// PLW0108
-pub(crate) fn unnecessary_lambda(checker: &mut Checker, lambda: &ExprLambda) {
+pub(crate) fn unnecessary_lambda(checker: &Checker, lambda: &ExprLambda) {
     let ExprLambda {
         parameters,
         body,
@@ -172,7 +179,7 @@ pub(crate) fn unnecessary_lambda(checker: &mut Checker, lambda: &ExprLambda) {
             if call_posargs.len() != lambda_posargs.len() {
                 return;
             }
-            for (param, arg) in lambda_posargs.iter().zip(call_posargs.iter()) {
+            for (param, arg) in lambda_posargs.iter().zip(call_posargs) {
                 let Expr::Name(ast::ExprName { id, .. }) = arg else {
                     return;
                 };
@@ -206,13 +213,9 @@ pub(crate) fn unnecessary_lambda(checker: &mut Checker, lambda: &ExprLambda) {
             checker.locator().slice(func.as_ref()).to_string(),
             lambda.range(),
         ),
-        if contains_effect(func.as_ref(), |id| checker.semantic().is_builtin(id)) {
-            Applicability::Unsafe
-        } else {
-            Applicability::Safe
-        },
+        Applicability::Unsafe,
     ));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Identify all `Expr::Name` nodes in an AST.
@@ -222,10 +225,7 @@ struct NameFinder<'a> {
     names: Vec<&'a ast::ExprName>,
 }
 
-impl<'a, 'b> Visitor<'b> for NameFinder<'a>
-where
-    'b: 'a,
-{
+impl<'a> Visitor<'a> for NameFinder<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if let Expr::Name(expr_name) = expr {
             self.names.push(expr_name);

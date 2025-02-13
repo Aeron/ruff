@@ -1,12 +1,13 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 
 /// ## What it does
-/// Checks for direct uses of lock objects in `with` statements.
+/// Checks for lock objects that are created and immediately discarded in
+/// `with` statements.
 ///
 /// ## Why is this bad?
 /// Creating a lock (via `threading.Lock` or similar) in a `with` statement
@@ -46,18 +47,18 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: `Lock Objects`](https://docs.python.org/3/library/threading.html#lock-objects)
-#[violation]
-pub struct UselessWithLock;
+#[derive(ViolationMetadata)]
+pub(crate) struct UselessWithLock;
 
 impl Violation for UselessWithLock {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Threading lock directly created in `with` statement has no effect")
+        "Threading lock directly created in `with` statement has no effect".to_string()
     }
 }
 
 /// PLW2101
-pub(crate) fn useless_with_lock(checker: &mut Checker, with: &ast::StmtWith) {
+pub(crate) fn useless_with_lock(checker: &Checker, with: &ast::StmtWith) {
     for item in &with.items {
         let Some(call) = item.context_expr.as_call_expr() else {
             continue;
@@ -65,10 +66,10 @@ pub(crate) fn useless_with_lock(checker: &mut Checker, with: &ast::StmtWith) {
 
         if !checker
             .semantic()
-            .resolve_call_path(call.func.as_ref())
-            .is_some_and(|call_path| {
+            .resolve_qualified_name(call.func.as_ref())
+            .is_some_and(|qualified_name| {
                 matches!(
-                    call_path.as_slice(),
+                    qualified_name.segments(),
                     [
                         "threading",
                         "Lock" | "RLock" | "Condition" | "Semaphore" | "BoundedSemaphore"
@@ -79,8 +80,6 @@ pub(crate) fn useless_with_lock(checker: &mut Checker, with: &ast::StmtWith) {
             return;
         }
 
-        checker
-            .diagnostics
-            .push(Diagnostic::new(UselessWithLock, call.range()));
+        checker.report_diagnostic(Diagnostic::new(UselessWithLock, call.range()));
     }
 }

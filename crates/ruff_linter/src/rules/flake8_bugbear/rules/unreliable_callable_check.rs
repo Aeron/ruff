@@ -1,7 +1,6 @@
-use ruff_python_ast::{self as ast, Expr};
-
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -32,38 +31,31 @@ use crate::checkers::ast::Checker;
 /// - [Python documentation: `hasattr`](https://docs.python.org/3/library/functions.html#hasattr)
 /// - [Python documentation: `__getattr__`](https://docs.python.org/3/reference/datamodel.html#object.__getattr__)
 /// - [Python documentation: `__call__`](https://docs.python.org/3/reference/datamodel.html#object.__call__)
-#[violation]
-pub struct UnreliableCallableCheck;
+#[derive(ViolationMetadata)]
+pub(crate) struct UnreliableCallableCheck;
 
 impl Violation for UnreliableCallableCheck {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(
-            "Using `hasattr(x, \"__call__\")` to test if x is callable is unreliable. Use \
+        "Using `hasattr(x, \"__call__\")` to test if x is callable is unreliable. Use \
              `callable(x)` for consistent results."
-        )
+            .to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
-        Some(format!("Replace with `callable()`"))
+        Some("Replace with `callable()`".to_string())
     }
 }
 
 /// B004
 pub(crate) fn unreliable_callable_check(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
 ) {
-    let Expr::Name(ast::ExprName { id, .. }) = func else {
-        return;
-    };
-    if !matches!(id.as_str(), "hasattr" | "getattr") {
-        return;
-    }
     let [obj, attr, ..] = args else {
         return;
     };
@@ -73,15 +65,27 @@ pub(crate) fn unreliable_callable_check(
     if value != "__call__" {
         return;
     }
+    let Some(builtins_function) = checker.semantic().resolve_builtin_symbol(func) else {
+        return;
+    };
+    if !matches!(builtins_function, "hasattr" | "getattr") {
+        return;
+    }
 
     let mut diagnostic = Diagnostic::new(UnreliableCallableCheck, expr.range());
-    if id == "hasattr" {
-        if checker.semantic().is_builtin("callable") {
-            diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
-                format!("callable({})", checker.locator().slice(obj)),
+    if builtins_function == "hasattr" {
+        diagnostic.try_set_fix(|| {
+            let (import_edit, binding) = checker.importer().get_or_import_builtin_symbol(
+                "callable",
+                expr.start(),
+                checker.semantic(),
+            )?;
+            let binding_edit = Edit::range_replacement(
+                format!("{binding}({})", checker.locator().slice(obj)),
                 expr.range(),
-            )));
-        }
+            );
+            Ok(Fix::safe_edits(binding_edit, import_edit))
+        });
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

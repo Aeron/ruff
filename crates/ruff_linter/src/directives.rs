@@ -4,21 +4,22 @@ use std::iter::Peekable;
 use std::str::FromStr;
 
 use bitflags::bitflags;
-use ruff_python_parser::lexer::LexResult;
-use ruff_python_parser::Tok;
-use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 
 use ruff_python_index::Indexer;
-use ruff_source_file::Locator;
+use ruff_python_parser::{TokenKind, Tokens};
+use ruff_python_trivia::CommentRanges;
+use ruff_source_file::LineRanges;
+use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 
 use crate::noqa::NoqaMapping;
 use crate::settings::LinterSettings;
+use crate::Locator;
 
 bitflags! {
     #[derive(Debug, Copy, Clone)]
     pub struct Flags: u8 {
-        const NOQA  = 0b0000_0001;
-        const ISORT = 0b0000_0010;
+        const NOQA  = 1 << 0;
+        const ISORT = 1 << 1;
     }
 }
 
@@ -45,41 +46,25 @@ pub struct IsortDirectives {
     pub skip_file: bool,
 }
 
-impl IsortDirectives {
-    pub fn is_excluded(&self, offset: TextSize) -> bool {
-        for range in &self.exclusions {
-            if range.contains(offset) {
-                return true;
-            }
-
-            if range.start() > offset {
-                break;
-            }
-        }
-
-        false
-    }
-}
-
 pub struct Directives {
     pub noqa_line_for: NoqaMapping,
     pub isort: IsortDirectives,
 }
 
 pub fn extract_directives(
-    lxr: &[LexResult],
+    tokens: &Tokens,
     flags: Flags,
     locator: &Locator,
     indexer: &Indexer,
 ) -> Directives {
     Directives {
         noqa_line_for: if flags.intersects(Flags::NOQA) {
-            extract_noqa_line_for(lxr, locator, indexer)
+            extract_noqa_line_for(tokens, locator, indexer)
         } else {
             NoqaMapping::default()
         },
         isort: if flags.intersects(Flags::ISORT) {
-            extract_isort_directives(lxr, locator)
+            extract_isort_directives(locator, indexer.comment_ranges())
         } else {
             IsortDirectives::default()
         },
@@ -120,25 +105,17 @@ where
 }
 
 /// Extract a mapping from logical line to noqa line.
-fn extract_noqa_line_for(lxr: &[LexResult], locator: &Locator, indexer: &Indexer) -> NoqaMapping {
+fn extract_noqa_line_for(tokens: &Tokens, locator: &Locator, indexer: &Indexer) -> NoqaMapping {
     let mut string_mappings = Vec::new();
 
-    for (tok, range) in lxr.iter().flatten() {
-        match tok {
-            Tok::EndOfFile => {
-                break;
-            }
-
-            // For multi-line strings, we expect `noqa` directives on the last line of the
-            // string.
-            Tok::String {
-                triple_quoted: true,
-                ..
-            } => {
-                if locator.contains_line_break(*range) {
+    for token in tokens {
+        match token.kind() {
+            // For multi-line strings, we expect `noqa` directives on the last line of the string.
+            TokenKind::String if token.is_triple_quoted_string() => {
+                if locator.contains_line_break(token.range()) {
                     string_mappings.push(TextRange::new(
-                        locator.line_start(range.start()),
-                        range.end(),
+                        locator.line_start(token.start()),
+                        token.end(),
                     ));
                 }
             }
@@ -215,15 +192,13 @@ fn extract_noqa_line_for(lxr: &[LexResult], locator: &Locator, indexer: &Indexer
 }
 
 /// Extract a set of ranges over which to disable isort.
-fn extract_isort_directives(lxr: &[LexResult], locator: &Locator) -> IsortDirectives {
+fn extract_isort_directives(locator: &Locator, comment_ranges: &CommentRanges) -> IsortDirectives {
     let mut exclusions: Vec<TextRange> = Vec::default();
     let mut splits: Vec<TextSize> = Vec::default();
     let mut off: Option<TextSize> = None;
 
-    for &(ref tok, range) in lxr.iter().flatten() {
-        let Tok::Comment(comment_text) = tok else {
-            continue;
-        };
+    for range in comment_ranges {
+        let comment_text = locator.slice(range);
 
         // `isort` allows for `# isort: skip` and `# isort: skip_file` to include or
         // omit a space after the colon. The remaining action comments are
@@ -278,7 +253,7 @@ pub(crate) struct TodoComment<'a> {
     pub(crate) directive: TodoDirective<'a>,
     /// The comment's actual [`TextRange`].
     pub(crate) range: TextRange,
-    /// The comment range's position in [`Indexer`].comment_ranges()
+    /// The comment range's position in [`Indexer::comment_ranges`]
     pub(crate) range_index: usize,
 }
 
@@ -313,19 +288,23 @@ impl<'a> TodoDirective<'a> {
     pub(crate) fn from_comment(comment: &'a str, comment_range: TextRange) -> Option<Self> {
         // The directive's offset from the start of the comment.
         let mut relative_offset = TextSize::new(0);
-        let mut subset_opt = Some(comment);
+        let mut subset = comment;
 
         // Loop over `#`-delimited sections of the comment to check for directives. This will
         // correctly handle cases like `# foo # TODO`.
-        while let Some(subset) = subset_opt {
+        loop {
             let trimmed = subset.trim_start_matches('#').trim_start();
 
             let offset = subset.text_len() - trimmed.text_len();
             relative_offset += offset;
 
+            // Find the first word. Don't use split by whitespace because that would include the `:` character
+            // in `TODO:`
+            let first_word = trimmed.split(|c: char| !c.is_alphanumeric()).next()?;
+
             // If we detect a TodoDirectiveKind variant substring in the comment, construct and
             // return the appropriate TodoDirective
-            if let Ok(directive_kind) = trimmed.parse::<TodoDirectiveKind>() {
+            if let Ok(directive_kind) = first_word.parse::<TodoDirectiveKind>() {
                 let len = directive_kind.len();
 
                 return Some(Self {
@@ -336,11 +315,11 @@ impl<'a> TodoDirective<'a> {
             }
 
             // Shrink the subset to check for the next phrase starting with "#".
-            subset_opt = if let Some(new_offset) = trimmed.find('#') {
+            if let Some(new_offset) = trimmed.find('#') {
                 relative_offset += TextSize::try_from(new_offset).unwrap();
-                subset.get(relative_offset.to_usize()..)
+                subset = &comment[relative_offset.to_usize()..];
             } else {
-                None
+                break;
             };
         }
 
@@ -360,30 +339,13 @@ impl FromStr for TodoDirectiveKind {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // The lengths of the respective variant strings: TODO, FIXME, HACK, XXX
-        for length in [3, 4, 5] {
-            let Some(substr) = s.get(..length) else {
-                break;
-            };
-
-            match substr.to_lowercase().as_str() {
-                "fixme" => {
-                    return Ok(TodoDirectiveKind::Fixme);
-                }
-                "hack" => {
-                    return Ok(TodoDirectiveKind::Hack);
-                }
-                "todo" => {
-                    return Ok(TodoDirectiveKind::Todo);
-                }
-                "xxx" => {
-                    return Ok(TodoDirectiveKind::Xxx);
-                }
-                _ => continue,
-            }
+        match s.to_lowercase().as_str() {
+            "fixme" => Ok(TodoDirectiveKind::Fixme),
+            "hack" => Ok(TodoDirectiveKind::Hack),
+            "todo" => Ok(TodoDirectiveKind::Todo),
+            "xxx" => Ok(TodoDirectiveKind::Xxx),
+            _ => Err(()),
         }
-
-        Err(())
     }
 }
 
@@ -399,24 +361,25 @@ impl TodoDirectiveKind {
 
 #[cfg(test)]
 mod tests {
-    use ruff_python_parser::lexer::LexResult;
-    use ruff_python_parser::{lexer, Mode};
-    use ruff_text_size::{TextLen, TextRange, TextSize};
-
     use ruff_python_index::Indexer;
-    use ruff_source_file::Locator;
+    use ruff_python_parser::parse_module;
+    use ruff_python_trivia::CommentRanges;
+    use ruff_text_size::{TextLen, TextRange, TextSize};
 
     use crate::directives::{
         extract_isort_directives, extract_noqa_line_for, TodoDirective, TodoDirectiveKind,
     };
     use crate::noqa::NoqaMapping;
+    use crate::Locator;
+
+    use super::IsortDirectives;
 
     fn noqa_mappings(contents: &str) -> NoqaMapping {
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
+        let parsed = parse_module(contents).unwrap();
         let locator = Locator::new(contents);
-        let indexer = Indexer::from_tokens(&lxr, &locator);
+        let indexer = Indexer::from_tokens(parsed.tokens(), locator.contents());
 
-        extract_noqa_line_for(&lxr, &locator, &indexer)
+        extract_noqa_line_for(parsed.tokens(), &locator, &indexer)
     }
 
     #[test]
@@ -586,25 +549,27 @@ assert foo, \
         );
     }
 
+    fn isort_directives(contents: &str) -> IsortDirectives {
+        let parsed = parse_module(contents).unwrap();
+        let locator = Locator::new(contents);
+        let comment_ranges = CommentRanges::from(parsed.tokens());
+        extract_isort_directives(&locator, &comment_ranges)
+    }
+
     #[test]
     fn isort_exclusions() {
         let contents = "x = 1
 y = 2
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
-            Vec::default()
-        );
+        assert_eq!(isort_directives(contents).exclusions, Vec::default());
 
         let contents = "# isort: off
 x = 1
 y = 2
 # isort: on
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
         assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
+            isort_directives(contents).exclusions,
             Vec::from_iter([TextRange::new(TextSize::from(0), TextSize::from(25))])
         );
 
@@ -615,9 +580,8 @@ y = 2
 # isort: on
 z = x + 1
 # isort: on";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
         assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
+            isort_directives(contents).exclusions,
             Vec::from_iter([TextRange::new(TextSize::from(0), TextSize::from(38))])
         );
 
@@ -625,9 +589,8 @@ z = x + 1
 x = 1
 y = 2
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
         assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
+            isort_directives(contents).exclusions,
             Vec::from_iter([TextRange::at(TextSize::from(0), contents.text_len())])
         );
 
@@ -635,11 +598,7 @@ z = x + 1";
 x = 1
 y = 2
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
-            Vec::default()
-        );
+        assert_eq!(isort_directives(contents).exclusions, Vec::default());
 
         let contents = "# isort: off
 x = 1
@@ -647,11 +606,7 @@ x = 1
 y = 2
 # isort: skip_file
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).exclusions,
-            Vec::default()
-        );
+        assert_eq!(isort_directives(contents).exclusions, Vec::default());
     }
 
     #[test]
@@ -659,30 +614,18 @@ z = x + 1";
         let contents = "x = 1
 y = 2
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).splits,
-            Vec::new()
-        );
+        assert_eq!(isort_directives(contents).splits, Vec::new());
 
         let contents = "x = 1
 y = 2
 # isort: split
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).splits,
-            vec![TextSize::from(12)]
-        );
+        assert_eq!(isort_directives(contents).splits, vec![TextSize::from(12)]);
 
         let contents = "x = 1
 y = 2  # isort: split
 z = x + 1";
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
-        assert_eq!(
-            extract_isort_directives(&lxr, &Locator::new(contents)).splits,
-            vec![TextSize::from(13)]
-        );
+        assert_eq!(isort_directives(contents).splits, vec![TextSize::from(13)]);
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod tests {
 
     use crate::assert_messages;
     use crate::registry::Rule;
+    use crate::settings::types::PreviewMode;
     use crate::settings::LinterSettings;
     use crate::test::test_path;
 
@@ -36,6 +37,9 @@ mod tests {
     #[test_case(Rule::SSHNoHostKeyVerification, Path::new("S507.py"))]
     #[test_case(Rule::SnmpInsecureVersion, Path::new("S508.py"))]
     #[test_case(Rule::SnmpWeakCryptography, Path::new("S509.py"))]
+    #[test_case(Rule::SslInsecureVersion, Path::new("S502.py"))]
+    #[test_case(Rule::SslWithBadDefaults, Path::new("S503.py"))]
+    #[test_case(Rule::SslWithNoVersion, Path::new("S504.py"))]
     #[test_case(Rule::StartProcessWithAShell, Path::new("S605.py"))]
     #[test_case(Rule::StartProcessWithNoShell, Path::new("S606.py"))]
     #[test_case(Rule::StartProcessWithPartialPath, Path::new("S607.py"))]
@@ -43,19 +47,74 @@ mod tests {
     #[test_case(Rule::SubprocessWithoutShellEqualsTrue, Path::new("S603.py"))]
     #[test_case(Rule::SuspiciousPickleUsage, Path::new("S301.py"))]
     #[test_case(Rule::SuspiciousEvalUsage, Path::new("S307.py"))]
+    #[test_case(Rule::SuspiciousMarkSafeUsage, Path::new("S308.py"))]
     #[test_case(Rule::SuspiciousURLOpenUsage, Path::new("S310.py"))]
+    #[test_case(Rule::SuspiciousNonCryptographicRandomUsage, Path::new("S311.py"))]
     #[test_case(Rule::SuspiciousTelnetUsage, Path::new("S312.py"))]
+    #[test_case(Rule::SuspiciousTelnetlibImport, Path::new("S401.py"))]
+    #[test_case(Rule::SuspiciousTelnetlibImport, Path::new("S401.pyi"))]
+    #[test_case(Rule::SuspiciousFtplibImport, Path::new("S402.py"))]
+    #[test_case(Rule::SuspiciousFtplibImport, Path::new("S402.pyi"))]
+    #[test_case(Rule::SuspiciousPickleImport, Path::new("S403.py"))]
+    #[test_case(Rule::SuspiciousPickleImport, Path::new("S403.pyi"))]
+    #[test_case(Rule::SuspiciousSubprocessImport, Path::new("S404.py"))]
+    #[test_case(Rule::SuspiciousSubprocessImport, Path::new("S404.pyi"))]
+    #[test_case(Rule::SuspiciousXmlEtreeImport, Path::new("S405.py"))]
+    #[test_case(Rule::SuspiciousXmlEtreeImport, Path::new("S405.pyi"))]
+    #[test_case(Rule::SuspiciousXmlSaxImport, Path::new("S406.py"))]
+    #[test_case(Rule::SuspiciousXmlSaxImport, Path::new("S406.pyi"))]
+    #[test_case(Rule::SuspiciousXmlExpatImport, Path::new("S407.py"))]
+    #[test_case(Rule::SuspiciousXmlExpatImport, Path::new("S407.pyi"))]
+    #[test_case(Rule::SuspiciousXmlMinidomImport, Path::new("S408.py"))]
+    #[test_case(Rule::SuspiciousXmlMinidomImport, Path::new("S408.pyi"))]
+    #[test_case(Rule::SuspiciousXmlPulldomImport, Path::new("S409.py"))]
+    #[test_case(Rule::SuspiciousXmlPulldomImport, Path::new("S409.pyi"))]
+    #[test_case(Rule::SuspiciousLxmlImport, Path::new("S410.py"))]
+    #[test_case(Rule::SuspiciousLxmlImport, Path::new("S410.pyi"))]
+    #[test_case(Rule::SuspiciousXmlrpcImport, Path::new("S411.py"))]
+    #[test_case(Rule::SuspiciousXmlrpcImport, Path::new("S411.pyi"))]
+    #[test_case(Rule::SuspiciousHttpoxyImport, Path::new("S412.py"))]
+    #[test_case(Rule::SuspiciousHttpoxyImport, Path::new("S412.pyi"))]
+    #[test_case(Rule::SuspiciousPycryptoImport, Path::new("S413.py"))]
+    #[test_case(Rule::SuspiciousPycryptoImport, Path::new("S413.pyi"))]
+    #[test_case(Rule::SuspiciousPyghmiImport, Path::new("S415.py"))]
+    #[test_case(Rule::SuspiciousPyghmiImport, Path::new("S415.pyi"))]
     #[test_case(Rule::TryExceptContinue, Path::new("S112.py"))]
     #[test_case(Rule::TryExceptPass, Path::new("S110.py"))]
     #[test_case(Rule::UnixCommandWildcardInjection, Path::new("S609.py"))]
     #[test_case(Rule::UnsafeYAMLLoad, Path::new("S506.py"))]
     #[test_case(Rule::WeakCryptographicKey, Path::new("S505.py"))]
+    #[test_case(Rule::DjangoExtra, Path::new("S610.py"))]
     #[test_case(Rule::DjangoRawSql, Path::new("S611.py"))]
+    #[test_case(Rule::TarfileUnsafeMembers, Path::new("S202.py"))]
     fn rules(rule_code: Rule, path: &Path) -> Result<()> {
         let snapshot = format!("{}_{}", rule_code.noqa_code(), path.to_string_lossy());
         let diagnostics = test_path(
             Path::new("flake8_bandit").join(path).as_path(),
             &LinterSettings::for_rule(rule_code),
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test_case(Rule::SuspiciousPickleUsage, Path::new("S301.py"))]
+    #[test_case(Rule::SuspiciousEvalUsage, Path::new("S307.py"))]
+    #[test_case(Rule::SuspiciousMarkSafeUsage, Path::new("S308.py"))]
+    #[test_case(Rule::SuspiciousURLOpenUsage, Path::new("S310.py"))]
+    #[test_case(Rule::SuspiciousNonCryptographicRandomUsage, Path::new("S311.py"))]
+    #[test_case(Rule::SuspiciousTelnetUsage, Path::new("S312.py"))]
+    fn preview_rules(rule_code: Rule, path: &Path) -> Result<()> {
+        let snapshot = format!(
+            "preview__{}_{}",
+            rule_code.noqa_code(),
+            path.to_string_lossy()
+        );
+        let diagnostics = test_path(
+            Path::new("flake8_bandit").join(path).as_path(),
+            &LinterSettings {
+                preview: PreviewMode::Enabled,
+                ..LinterSettings::for_rule(rule_code)
+            },
         )?;
         assert_messages!(snapshot, diagnostics);
         Ok(())

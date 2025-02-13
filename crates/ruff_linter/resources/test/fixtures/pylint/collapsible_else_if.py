@@ -49,6 +49,17 @@ def not_ok1():
             pass
 
 
+def not_ok1_with_comments():
+    if 1:
+        pass
+    else:
+        # inner comment
+        if 2:
+            pass
+        else:
+            pass  # final pass comment
+
+
 # Regression test for https://github.com/apache/airflow/blob/f1e1cdcc3b2826e68ba133f350300b5065bbca33/airflow/models/dag.py#L1737
 def not_ok2():
     if True:
@@ -61,3 +72,75 @@ def not_ok2():
         else:
             print(4)
 
+
+def not_ok3():
+    if 1:
+        pass
+    else:
+        if 2: pass
+        else: pass
+
+
+def not_ok4():
+    if 1:
+        pass
+    else:
+        if 2: pass
+        else:
+            pass
+
+
+def not_ok5():
+    if 1:
+        pass
+    else:
+        if 2:
+            pass
+        else: pass
+
+
+def not_ok1_with_multiline_comments():
+    if 1:
+        pass
+    else:
+        # inner comment which happens
+        # to be longer than one line
+        if 2:
+            pass
+        else:
+            pass  # final pass comment
+
+
+def not_ok1_with_deep_indented_comments():
+    if 1:
+        pass
+    else:
+            # inner comment which happens to be overly indented
+        if 2:
+            pass
+        else:
+            pass  # final pass comment
+
+
+def not_ok1_with_shallow_indented_comments():
+    if 1:
+        pass
+    else:
+    # inner comment which happens to be under indented
+        if 2:
+            pass
+        else:
+            pass  # final pass comment
+
+
+def not_ok1_with_mixed_indented_comments():
+    if 1:
+        pass
+    else:
+            # inner comment which has mixed
+        # indentation levels
+                # which is pretty weird
+        if 2:
+            pass
+        else:
+            pass  # final pass comment

@@ -109,6 +109,11 @@ match long_lines:
     ):  # another comment
         pass
 
+    case {
+        "long_long_long_key": str(long_long_long_key)
+    } if value := "long long long long long long long long long long long value":
+        pass
+
 
 match pattern_comments:
     case (
@@ -578,3 +583,33 @@ match n % 3, n % 5:
         print("Buzz")
     case _:
         print(n)
+
+# Unparenthesized tuples
+match x:
+    case Child(aaaaaaaaa, bbbbbbbbbbbbbbb, cccccc), Doc(aaaaa, bbbbbbbbbb, ddddddddddddd):
+        pass
+
+
+match guard_comments:
+    case "abcd" if (  # trailing open parentheses comment
+        aaaaaaaaahhhhhhhh == 1 and bbbbbbaaaaaaaaaaa == 2
+    ):
+        pass
+
+    case "bcdef" if (
+        aaaaaaaaahhhhhhhh == 1 and bbbbbbaaaaaaaaaaa == 2 # trailing end of line comment
+    ):  # comment
+        pass
+
+    case "efgh" if (
+        # leading own line comment
+        aaaaaahhhhhh == 1
+    ):
+        pass
+
+    case "hijk" if (
+        aaaaaaaaa == 1
+        # trailing own line comment
+    ):
+        pass
+

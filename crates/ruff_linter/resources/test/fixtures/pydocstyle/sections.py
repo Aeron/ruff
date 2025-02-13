@@ -536,9 +536,97 @@ def non_empty_blank_line_before_section():  # noqa: D416
     """Toggle the gizmo.
 
     The function's description.
-    
+
     Returns
     -------
     A value of some sort.
 
     """
+
+
+def lowercase_sub_section_header():
+    """Below, `returns:` should _not_ be considered a section header.
+
+    Args:
+        Here's a note.
+
+        returns:
+    """
+
+
+def titlecase_sub_section_header():
+    """Below, `Returns:` should be considered a section header.
+
+    Args:
+        Here's a note.
+
+        Returns:
+    """
+
+
+def newline_sub_section_header():
+    """Below, `returns:` should be considered a section header.
+
+    Args:
+        arg: Here's a note.
+
+    returns:
+        Here's another note.
+    """
+
+
+def test_method_should_be_correctly_capitalized(parameters: list[str], other_parameters: dict[str, str]): # noqa: D213
+    """Test parameters and attributes sections are capitalized correctly.
+
+    Parameters
+    ----------
+    parameters:
+        A list of string parameters
+    other_parameters:
+        A dictionary of string attributes
+
+    Other Parameters
+    ----------
+    other_parameters:
+        A dictionary of string attributes
+    parameters:
+        A list of string parameters
+
+    """
+
+
+def test_lowercase_sub_section_header_should_be_valid(parameters: list[str], value: int):  # noqa: D213
+    """Test that lower case subsection header is valid even if it has the same name as section kind.
+
+    Parameters:
+    ----------
+    parameters:
+        A list of string parameters
+    value:
+        Some value
+    """
+
+
+def test_lowercase_sub_section_header_different_kind(returns: int):
+   """Test that lower case subsection header is valid even if it is of a different kind.
+
+   Parameters
+   -‐-----------------
+   returns:
+       some value
+
+   """
+
+
+# We used to incorrectly infer this as a numpy-style docstring,
+# which caused us to emit D406 and D407 on it;
+# see https://github.com/astral-sh/ruff/issues/13139
+def another_valid_google_style_docstring(a: str) -> str:
+    """Foo bar.
+
+    Examples:
+        Some explanation here.
+        >>> bla bla bla
+
+    """
+    return a

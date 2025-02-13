@@ -1,13 +1,12 @@
 use ruff_formatter::{FormatOwnedWithRule, FormatRefWithRule};
-use ruff_python_ast::AnyNodeRef;
+use ruff_python_ast::{AnyNodeRef, StringLike};
 use ruff_python_ast::{CmpOp, ExprCompare};
 
-use crate::comments::SourceComment;
 use crate::expression::binary_like::BinaryLike;
-use crate::expression::expr_string_literal::is_multiline_string;
 use crate::expression::has_parentheses;
 use crate::expression::parentheses::{NeedsParentheses, OptionalParentheses};
 use crate::prelude::*;
+use crate::string::StringLikeExtensions;
 
 #[derive(Default)]
 pub struct FormatExprCompare;
@@ -16,16 +15,6 @@ impl FormatNodeRule<ExprCompare> for FormatExprCompare {
     #[inline]
     fn fmt_fields(&self, item: &ExprCompare, f: &mut PyFormatter) -> FormatResult<()> {
         BinaryLike::Compare(item).fmt(f)
-    }
-
-    fn fmt_dangling_comments(
-        &self,
-        dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Node can not have dangling comments
-        debug_assert!(dangling_comments.is_empty());
-        Ok(())
     }
 }
 
@@ -37,11 +26,11 @@ impl NeedsParentheses for ExprCompare {
     ) -> OptionalParentheses {
         if parent.is_expr_await() {
             OptionalParentheses::Always
-        } else if self.left.is_literal_expr() {
+        } else if let Ok(string) = StringLike::try_from(&*self.left) {
             // Multiline strings are guaranteed to never fit, avoid adding unnecessary parentheses
-            if !self.left.is_implicit_concatenated_string()
-                && is_multiline_string(self.left.as_ref().into(), context.source())
-                && !context.comments().has(self.left.as_ref())
+            if !string.is_implicit_concatenated()
+                && string.is_multiline(context)
+                && !context.comments().has(string)
                 && self.comparators.first().is_some_and(|right| {
                     has_parentheses(right, context).is_some() && !context.comments().has(right)
                 })

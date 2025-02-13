@@ -2,7 +2,8 @@ use rustc_hash::FxHashMap;
 
 use ast::traversal;
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::traversal::EnclosingSuite;
 use ruff_python_ast::{self as ast, Expr, Stmt};
 use ruff_python_codegen::Generator;
 use ruff_python_semantic::analyze::typing::is_list;
@@ -43,8 +44,8 @@ use crate::fix::snippet::SourceCodeSnippet;
 ///
 /// ## References
 /// - [Python documentation: More on Lists](https://docs.python.org/3/tutorial/datastructures.html#more-on-lists)
-#[violation]
-pub struct RepeatedAppend {
+#[derive(ViolationMetadata)]
+pub(crate) struct RepeatedAppend {
     name: String,
     replacement: SourceCodeSnippet,
 }
@@ -75,7 +76,7 @@ impl Violation for RepeatedAppend {
 }
 
 /// FURB113
-pub(crate) fn repeated_append(checker: &mut Checker, stmt: &Stmt) {
+pub(crate) fn repeated_append(checker: &Checker, stmt: &Stmt) {
     let Some(appends) = match_consecutive_appends(stmt, checker.semantic()) else {
         return;
     };
@@ -114,8 +115,7 @@ pub(crate) fn repeated_append(checker: &mut Checker, stmt: &Stmt) {
             // # comment
             // a.append(2)
             // ```
-            if group.is_consecutive && !checker.indexer().comment_ranges().intersects(group.range())
-            {
+            if group.is_consecutive && !checker.comment_ranges().intersects(group.range()) {
                 diagnostic.set_fix(Fix::unsafe_edit(Edit::replacement(
                     replacement,
                     group.start(),
@@ -127,7 +127,7 @@ pub(crate) fn repeated_append(checker: &mut Checker, stmt: &Stmt) {
         })
         .collect();
 
-    checker.diagnostics.extend(diagnostics);
+    checker.report_diagnostics(diagnostics);
 }
 
 #[derive(Debug, Clone)]
@@ -180,10 +180,10 @@ fn match_consecutive_appends<'a>(
 
     // In order to match consecutive statements, we need to go to the tree ancestor of the
     // given statement, find its position there, and match all 'appends' from there.
-    let siblings: &[Stmt] = if semantic.at_top_level() {
+    let suite = if semantic.at_top_level() {
         // If the statement is at the top level, we should go to the parent module.
         // Module is available in the definitions list.
-        semantic.definitions.python_ast()?
+        EnclosingSuite::new(semantic.definitions.python_ast()?, stmt)?
     } else {
         // Otherwise, go to the parent, and take its body as a sequence of siblings.
         semantic
@@ -191,11 +191,12 @@ fn match_consecutive_appends<'a>(
             .and_then(|parent| traversal::suite(stmt, parent))?
     };
 
-    let stmt_index = siblings.iter().position(|sibling| sibling == stmt)?;
-
     // We shouldn't repeat the same work for many 'appends' that go in a row. Let's check
     // that this statement is at the beginning of such a group.
-    if stmt_index != 0 && match_append(semantic, &siblings[stmt_index - 1]).is_some() {
+    if suite
+        .previous_sibling()
+        .is_some_and(|previous_stmt| match_append(semantic, previous_stmt).is_some())
+    {
         return None;
     }
 
@@ -203,9 +204,9 @@ fn match_consecutive_appends<'a>(
     Some(
         std::iter::once(append)
             .chain(
-                siblings
+                suite
+                    .next_siblings()
                     .iter()
-                    .skip(stmt_index + 1)
                     .map_while(|sibling| match_append(semantic, sibling)),
             )
             .collect(),
@@ -280,7 +281,7 @@ fn match_append<'a>(semantic: &'a SemanticModel, stmt: &'a Stmt) -> Option<Appen
     };
 
     // `append` should have just one argument, an element to be added.
-    let [argument] = arguments.args.as_slice() else {
+    let [argument] = &*arguments.args else {
         return None;
     };
 
@@ -347,6 +348,7 @@ fn make_suggestion(group: &AppendGroup, generator: Generator) -> String {
         elts,
         ctx: ast::ExprContext::Load,
         range: TextRange::default(),
+        parenthesized: true,
     };
     // Make `var.extend`.
     // NOTE: receiver is the same for all appends and that's why we can take the first.
@@ -360,8 +362,8 @@ fn make_suggestion(group: &AppendGroup, generator: Generator) -> String {
     let call = ast::ExprCall {
         func: Box::new(attr.into()),
         arguments: ast::Arguments {
-            args: vec![tuple.into()],
-            keywords: vec![],
+            args: Box::from([tuple.into()]),
+            keywords: Box::from([]),
             range: TextRange::default(),
         },
         range: TextRange::default(),

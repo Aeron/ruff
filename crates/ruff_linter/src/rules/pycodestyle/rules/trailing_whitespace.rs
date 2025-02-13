@@ -1,11 +1,12 @@
-use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_diagnostics::{AlwaysFixableViolation, Applicability, Diagnostic, Edit, Fix};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_index::Indexer;
-use ruff_source_file::{Line, Locator};
+use ruff_source_file::Line;
 use ruff_text_size::{TextLen, TextRange, TextSize};
 
 use crate::registry::Rule;
 use crate::settings::LinterSettings;
+use crate::Locator;
 
 /// ## What it does
 /// Checks for superfluous trailing whitespace.
@@ -25,13 +26,13 @@ use crate::settings::LinterSettings;
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#other-recommendations
-#[violation]
-pub struct TrailingWhitespace;
+#[derive(ViolationMetadata)]
+pub(crate) struct TrailingWhitespace;
 
 impl AlwaysFixableViolation for TrailingWhitespace {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Trailing whitespace")
+        "Trailing whitespace".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -57,13 +58,13 @@ impl AlwaysFixableViolation for TrailingWhitespace {
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#other-recommendations
-#[violation]
-pub struct BlankLineWithWhitespace;
+#[derive(ViolationMetadata)]
+pub(crate) struct BlankLineWithWhitespace;
 
 impl AlwaysFixableViolation for BlankLineWithWhitespace {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Blank line contains whitespace")
+        "Blank line contains whitespace".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -86,23 +87,34 @@ pub(crate) fn trailing_whitespace(
         .sum();
     if whitespace_len > TextSize::from(0) {
         let range = TextRange::new(line.end() - whitespace_len, line.end());
-
+        // Removing trailing whitespace is not safe inside multiline strings.
+        let applicability = if indexer.multiline_ranges().contains_range(range) {
+            Applicability::Unsafe
+        } else {
+            Applicability::Safe
+        };
         if range == line.range() {
             if settings.rules.enabled(Rule::BlankLineWithWhitespace) {
                 let mut diagnostic = Diagnostic::new(BlankLineWithWhitespace, range);
                 // Remove any preceding continuations, to avoid introducing a potential
                 // syntax error.
-                diagnostic.set_fix(Fix::safe_edit(Edit::range_deletion(TextRange::new(
-                    indexer
-                        .preceded_by_continuations(line.start(), locator)
-                        .unwrap_or(range.start()),
-                    range.end(),
-                ))));
+                diagnostic.set_fix(Fix::applicable_edit(
+                    Edit::range_deletion(TextRange::new(
+                        indexer
+                            .preceded_by_continuations(line.start(), locator.contents())
+                            .unwrap_or(range.start()),
+                        range.end(),
+                    )),
+                    applicability,
+                ));
                 return Some(diagnostic);
             }
         } else if settings.rules.enabled(Rule::TrailingWhitespace) {
             let mut diagnostic = Diagnostic::new(TrailingWhitespace, range);
-            diagnostic.set_fix(Fix::safe_edit(Edit::range_deletion(range)));
+            diagnostic.set_fix(Fix::applicable_edit(
+                Edit::range_deletion(range),
+                applicability,
+            ));
             return Some(diagnostic);
         }
     }

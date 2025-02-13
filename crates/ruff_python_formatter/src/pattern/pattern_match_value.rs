@@ -17,9 +17,9 @@ impl FormatNodeRule<PatternMatchValue> for FormatPatternMatchValue {
 impl NeedsParentheses for PatternMatchValue {
     fn needs_parentheses(
         &self,
-        _parent: AnyNodeRef,
-        _context: &PyFormatContext,
+        parent: AnyNodeRef,
+        context: &PyFormatContext,
     ) -> OptionalParentheses {
-        OptionalParentheses::Never
+        self.value.needs_parentheses(parent, context)
     }
 }

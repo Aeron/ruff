@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime
 from array import array
 from dataclasses import dataclass
-from uuid import UUID  # TCH003
+from uuid import UUID  # TC003
+from collections.abc import Sequence
+from pydantic import validate_call
 
 import attrs
 from attrs import frozen
@@ -22,3 +24,8 @@ class B:
 @dataclass
 class C:
     x: UUID
+
+
+@validate_call(config={'arbitrary_types_allowed': True})
+def test(user: Sequence):
+    ...

@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_python_parser/src/string.rs
-expression: parse_ast
+expression: suite
+snapshot_kind: text
 ---
 [
     Expr(
@@ -9,11 +10,24 @@ expression: parse_ast
             value: BytesLiteral(
                 ExprBytesLiteral {
                     range: 0..6,
-                    value: [
-                        92,
-                        92,
-                    ],
-                    implicit_concatenated: false,
+                    value: BytesLiteralValue {
+                        inner: Single(
+                            BytesLiteral {
+                                range: 0..6,
+                                value: [
+                                    92,
+                                    92,
+                                ],
+                                flags: BytesLiteralFlags {
+                                    quote_style: Single,
+                                    prefix: Raw {
+                                        uppercase_r: false,
+                                    },
+                                    triple_quoted: false,
+                                },
+                            },
+                        ),
+                    },
                 },
             ),
         },

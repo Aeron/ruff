@@ -25,7 +25,7 @@ F841_3.py:6:5: F841 [*] Local variable `y` is assigned to but never used
 5 |     x = 1
 6 |     y = 2
   |     ^ F841
-7 | 
+7 |
 8 |     z = 3
   |
   = help: Remove assignment to unused variable `y`
@@ -63,7 +63,7 @@ F841_3.py:14:5: F841 [*] Local variable `y` is assigned to but never used
 13 |     x: int = 1
 14 |     y: int = 2
    |     ^ F841
-15 | 
+15 |
 16 |     z: int = 3
    |
    = help: Remove assignment to unused variable `y`
@@ -99,7 +99,7 @@ F841_3.py:21:19: F841 [*] Local variable `x1` is assigned to but never used
 F841_3.py:27:20: F841 [*] Local variable `x3` is assigned to but never used
    |
 25 |         pass
-26 | 
+26 |
 27 |     with (foo() as x3, foo() as y3, foo() as z3):
    |                    ^^ F841
 28 |         pass
@@ -119,7 +119,7 @@ F841_3.py:27:20: F841 [*] Local variable `x3` is assigned to but never used
 F841_3.py:27:33: F841 [*] Local variable `y3` is assigned to but never used
    |
 25 |         pass
-26 | 
+26 |
 27 |     with (foo() as x3, foo() as y3, foo() as z3):
    |                                 ^^ F841
 28 |         pass
@@ -139,7 +139,7 @@ F841_3.py:27:33: F841 [*] Local variable `y3` is assigned to but never used
 F841_3.py:27:46: F841 [*] Local variable `z3` is assigned to but never used
    |
 25 |         pass
-26 | 
+26 |
 27 |     with (foo() as x3, foo() as y3, foo() as z3):
    |                                              ^^ F841
 28 |         pass
@@ -156,7 +156,7 @@ F841_3.py:27:46: F841 [*] Local variable `z3` is assigned to but never used
 29 29 | 
 30 30 | 
 
-F841_3.py:32:6: F841 Local variable `x1` is assigned to but never used
+F841_3.py:32:6: F841 [*] Local variable `x1` is assigned to but never used
    |
 31 | def f():
 32 |     (x1, y1) = (1, 2)
@@ -166,7 +166,17 @@ F841_3.py:32:6: F841 Local variable `x1` is assigned to but never used
    |
    = help: Remove assignment to unused variable `x1`
 
-F841_3.py:32:10: F841 Local variable `y1` is assigned to but never used
+ℹ Unsafe fix
+29 29 | 
+30 30 | 
+31 31 | def f():
+32    |-    (x1, y1) = (1, 2)
+   32 |+    (_x1, y1) = (1, 2)
+33 33 |     (x2, y2) = coords2 = (1, 2)
+34 34 |     coords3 = (x3, y3) = (1, 2)
+35 35 | 
+
+F841_3.py:32:10: F841 [*] Local variable `y1` is assigned to but never used
    |
 31 | def f():
 32 |     (x1, y1) = (1, 2)
@@ -175,6 +185,16 @@ F841_3.py:32:10: F841 Local variable `y1` is assigned to but never used
 34 |     coords3 = (x3, y3) = (1, 2)
    |
    = help: Remove assignment to unused variable `y1`
+
+ℹ Unsafe fix
+29 29 | 
+30 30 | 
+31 31 | def f():
+32    |-    (x1, y1) = (1, 2)
+   32 |+    (x1, _y1) = (1, 2)
+33 33 |     (x2, y2) = coords2 = (1, 2)
+34 34 |     coords3 = (x3, y3) = (1, 2)
+35 35 | 
 
 F841_3.py:33:16: F841 [*] Local variable `coords2` is assigned to but never used
    |
@@ -278,7 +298,7 @@ F841_3.py:50:5: F841 [*] Local variable `x` is assigned to but never used
 F841_3.py:56:5: F841 [*] Local variable `y` is assigned to but never used
    |
 54 |     )
-55 | 
+55 |
 56 |     y = \
    |     ^ F841
 57 |         a() if a is not None else b
@@ -322,7 +342,7 @@ F841_3.py:61:5: F841 [*] Local variable `x` is assigned to but never used
 F841_3.py:67:5: F841 [*] Local variable `y` is assigned to but never used
    |
 65 |     )
-66 | 
+66 |
 67 |     y = \
    |     ^ F841
 68 |         a if a is not None else b
@@ -645,7 +665,7 @@ F841_3.py:165:5: F841 [*] Local variable `x` is assigned to but never used
 164 | def f():
 165 |     x = 1
     |     ^ F841
-166 | 
+166 |
 167 |     y = 2
     |
     = help: Remove assignment to unused variable `x`
@@ -662,7 +682,7 @@ F841_3.py:165:5: F841 [*] Local variable `x` is assigned to but never used
 F841_3.py:167:5: F841 [*] Local variable `y` is assigned to but never used
     |
 165 |     x = 1
-166 | 
+166 |
 167 |     y = 2
     |     ^ F841
     |
@@ -692,5 +712,3 @@ F841_3.py:173:6: F841 [*] Local variable `x` is assigned to but never used
 172 172 |     ((x)) = foo()
 173     |-    (x) = (y.z) = foo()
     173 |+    (y.z) = foo()
-
-

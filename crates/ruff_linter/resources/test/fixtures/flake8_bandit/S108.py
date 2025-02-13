@@ -5,6 +5,9 @@ with open("/abc/tmp", "w") as f:
 with open("/tmp/abc", "w") as f:
     f.write("def")
 
+with open(f"/tmp/abc", "w") as f:
+    f.write("def")
+
 with open("/var/tmp/123", "w") as f:
     f.write("def")
 
@@ -13,6 +16,13 @@ with open("/dev/shm/unit/test", "w") as f:
 
 # not ok by config
 with open("/foo/bar", "w") as f:
+    f.write("def")
+
+# Implicit string concatenation
+with open("/tmp/" "abc", "w") as f:
+    f.write("def")
+
+with open("/tmp/abc" f"/tmp/abc", "w") as f:
     f.write("def")
 
 # Using `tempfile` module should be ok

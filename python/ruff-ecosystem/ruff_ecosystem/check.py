@@ -1,6 +1,7 @@
 """
 Execution, comparison, and summary of `ruff check` ecosystem checks.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,8 +29,12 @@ from ruff_ecosystem.types import (
 )
 
 if TYPE_CHECKING:
-    from ruff_ecosystem.projects import CheckOptions, ClonedRepository, Project
-
+    from ruff_ecosystem.projects import (
+        CheckOptions,
+        ClonedRepository,
+        ConfigOverrides,
+        Project,
+    )
 
 # Matches lines that are summaries rather than diagnostics
 CHECK_SUMMARY_LINE_RE = re.compile(r"^(Found \d+ error.*)|(.* fixable with .*)$")
@@ -52,6 +57,8 @@ def markdown_check_result(result: Result) -> str:
     """
     Render a `ruff check` ecosystem check result as markdown.
     """
+    projects_with_changes = 0
+
     # Calculate the total number of rule changes
     all_rule_changes = RuleChanges()
     project_diffs = {
@@ -63,7 +70,10 @@ def markdown_check_result(result: Result) -> str:
         project_rule_changes[project] = changes = RuleChanges.from_diff(diff)
         all_rule_changes.update(changes)
 
-    lines = []
+        if diff:
+            projects_with_changes += 1
+
+    lines: list[str] = []
     total_removed = all_rule_changes.total_removed_violations()
     total_added = all_rule_changes.total_added_violations()
     total_added_fixes = all_rule_changes.total_added_fixes()
@@ -88,11 +98,17 @@ def markdown_check_result(result: Result) -> str:
         change_summary = (
             f"{markdown_plus_minus(total_added, total_removed)} violations, "
             f"{markdown_plus_minus(total_added_fixes, total_removed_fixes)} fixes "
-            f"in {len(result.completed)} projects"
+            f"in {projects_with_changes} projects"
         )
         if error_count:
             s = "s" if error_count != 1 else ""
             change_summary += f"; {error_count} project error{s}"
+
+        unchanged_projects = len(result.completed) - projects_with_changes
+        if unchanged_projects:
+            s = "s" if unchanged_projects != 1 else ""
+            change_summary += f"; {unchanged_projects} project{s} unchanged"
+
         lines.append(
             f"\u2139\ufe0f ecosystem check **detected linter changes**. ({change_summary})"
         )
@@ -105,7 +121,7 @@ def markdown_check_result(result: Result) -> str:
         if len(" ".join(lines)) > GITHUB_MAX_COMMENT_LENGTH // 3:
             lines.append("")
             lines.append(
-                "_... Truncated remaining completed projected reports due to GitHub comment length restrictions_"
+                "_... Truncated remaining completed project reports due to GitHub comment length restrictions_"
             )
             lines.append("")
             break
@@ -128,12 +144,32 @@ def markdown_check_result(result: Result) -> str:
 
         # Limit the number of items displayed per project to between 10 and 50
         # based on the proportion of total changes present in this project
-        max_display_per_project = max(10, int((project_changes / total_changes) * 50))
+        max_display_per_project = max(
+            10,
+            int(
+                (
+                    # TODO(zanieb): We take the `max` here to avoid division by zero errors where
+                    # `total_changes` is zero but `total_affected_rules` is non-zero so we did not
+                    # skip display. This shouldn't really happen and indicates a problem in the
+                    # calculation of these values. Instead of skipping entirely when `total_changes`
+                    # is zero, we'll attempt to report the results to help diagnose the problem.
+                    #
+                    # There's similar issues with the `max_display_per_rule` calculation immediately
+                    # below as well.
+                    project_changes / max(total_changes, 1)
+                )
+                * 50
+            ),
+        )
 
         # Limit the number of items displayed per rule to between 5 and the max for
         # the project based on the number of rules affected (less rules, more per rule)
         max_display_per_rule = max(
-            5, max_display_per_project // len(rule_changes.rule_codes())
+            5,
+            # TODO: remove the need for the max() call here,
+            # which is a workaround for if `len(rule_changes.rule_codes()) == 0`
+            # (see comment in the assignment of `max_display_per_project` immediately above)
+            max_display_per_project // max(len(rule_changes.rule_codes()), 1),
         )
 
         # Display the diff
@@ -466,25 +502,27 @@ async def compare_check(
     ruff_baseline_executable: Path,
     ruff_comparison_executable: Path,
     options: CheckOptions,
+    config_overrides: ConfigOverrides,
     cloned_repo: ClonedRepository,
 ) -> Comparison:
-    async with asyncio.TaskGroup() as tg:
-        baseline_task = tg.create_task(
-            ruff_check(
-                executable=ruff_baseline_executable.resolve(),
-                path=cloned_repo.path,
-                name=cloned_repo.fullname,
-                options=options,
-            ),
-        )
-        comparison_task = tg.create_task(
-            ruff_check(
-                executable=ruff_comparison_executable.resolve(),
-                path=cloned_repo.path,
-                name=cloned_repo.fullname,
-                options=options,
-            ),
-        )
+    with config_overrides.patch_config(cloned_repo.path, options.preview):
+        async with asyncio.TaskGroup() as tg:
+            baseline_task = tg.create_task(
+                ruff_check(
+                    executable=ruff_baseline_executable.resolve(),
+                    path=cloned_repo.path,
+                    name=cloned_repo.fullname,
+                    options=options,
+                ),
+            )
+            comparison_task = tg.create_task(
+                ruff_check(
+                    executable=ruff_comparison_executable.resolve(),
+                    path=cloned_repo.path,
+                    name=cloned_repo.fullname,
+                    options=options,
+                ),
+            )
 
     baseline_output, comparison_output = (
         baseline_task.result(),

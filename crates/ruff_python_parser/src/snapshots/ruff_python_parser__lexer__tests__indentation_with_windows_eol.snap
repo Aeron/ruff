@@ -1,16 +1,19 @@
 ---
 source: crates/ruff_python_parser/src/lexer.rs
 expression: indentation_with_eol(WINDOWS_EOL)
+snapshot_kind: text
 ---
+## Tokens
+```
 [
     (
         Def,
         0..3,
     ),
     (
-        Name {
-            name: "foo",
-        },
+        Name(
+            Name("foo"),
+        ),
         4..7,
     ),
     (
@@ -38,9 +41,9 @@ expression: indentation_with_eol(WINDOWS_EOL)
         16..22,
     ),
     (
-        Int {
-            value: 99,
-        },
+        Int(
+            99,
+        ),
         23..25,
     ),
     (
@@ -56,3 +59,4 @@ expression: indentation_with_eol(WINDOWS_EOL)
         29..29,
     ),
 ]
+```

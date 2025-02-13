@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast as ast;
 use ruff_python_semantic::analyze::visibility::{self, Visibility::Public};
 use ruff_text_size::Ranged;
@@ -10,7 +10,7 @@ use crate::checkers::ast::Checker;
 /// Checks for classes with too many public methods
 ///
 /// By default, this rule allows up to 20 public methods, as configured by
-/// the [`pylint.max-public-methods`] option.
+/// the [`lint.pylint.max-public-methods`] option.
 ///
 /// ## Why is this bad?
 /// Classes with many public methods are harder to understand
@@ -19,7 +19,7 @@ use crate::checkers::ast::Checker;
 /// Instead, consider refactoring the class into separate classes.
 ///
 /// ## Example
-/// Assuming that `pylint.max-public-settings` is set to 5:
+/// Assuming that `lint.pylint.max-public-methods` is set to 5:
 /// ```python
 /// class Linter:
 ///     def __init__(self):
@@ -81,9 +81,9 @@ use crate::checkers::ast::Checker;
 /// ```
 ///
 /// ## Options
-/// - `pylint.max-public-methods`
-#[violation]
-pub struct TooManyPublicMethods {
+/// - `lint.pylint.max-public-methods`
+#[derive(ViolationMetadata)]
+pub(crate) struct TooManyPublicMethods {
     methods: usize,
     max_methods: usize,
 }
@@ -101,21 +101,27 @@ impl Violation for TooManyPublicMethods {
 
 /// R0904
 pub(crate) fn too_many_public_methods(
-    checker: &mut Checker,
+    checker: &Checker,
     class_def: &ast::StmtClassDef,
     max_methods: usize,
 ) {
+    // https://github.com/astral-sh/ruff/issues/14535
+    if checker.source_type.is_stub() {
+        return;
+    }
     let methods = class_def
         .body
         .iter()
         .filter(|stmt| {
-            stmt.as_function_def_stmt()
-                .is_some_and(|node| matches!(visibility::method_visibility(node), Public))
+            stmt.as_function_def_stmt().is_some_and(|node| {
+                matches!(visibility::method_visibility(node), Public)
+                    && !visibility::is_overload(&node.decorator_list, checker.semantic())
+            })
         })
         .count();
 
     if methods > max_methods {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             TooManyPublicMethods {
                 methods,
                 max_methods,

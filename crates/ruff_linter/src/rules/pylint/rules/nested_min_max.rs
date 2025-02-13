@@ -2,7 +2,7 @@ use ruff_python_ast::{self as ast, Arguments, Expr, Keyword};
 use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_semantic::SemanticModel;
 
 use crate::checkers::ast::Checker;
@@ -37,8 +37,8 @@ pub(crate) enum MinMax {
 /// ## References
 /// - [Python documentation: `min`](https://docs.python.org/3/library/functions.html#min)
 /// - [Python documentation: `max`](https://docs.python.org/3/library/functions.html#max)
-#[violation]
-pub struct NestedMinMax {
+#[derive(ViolationMetadata)]
+pub(crate) struct NestedMinMax {
     func: MinMax,
 }
 
@@ -68,15 +68,10 @@ impl MinMax {
         if !keywords.is_empty() {
             return None;
         }
-        let Expr::Name(ast::ExprName { id, .. }) = func else {
-            return None;
-        };
-        if id.as_str() == "min" && semantic.is_builtin("min") {
-            Some(MinMax::Min)
-        } else if id.as_str() == "max" && semantic.is_builtin("max") {
-            Some(MinMax::Max)
-        } else {
-            None
+        match semantic.resolve_builtin_symbol(func)? {
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            _ => None,
         }
     }
 }
@@ -106,18 +101,18 @@ fn collect_nested_args(min_max: MinMax, args: &[Expr], semantic: &SemanticModel)
                 range: _,
             }) = arg
             {
-                if let [arg] = args.as_slice() {
-                    if arg.as_starred_expr().is_none() {
-                        let new_arg = Expr::Starred(ast::ExprStarred {
-                            value: Box::new(arg.clone()),
-                            ctx: ast::ExprContext::Load,
-                            range: TextRange::default(),
-                        });
-                        new_args.push(new_arg);
-                        continue;
-                    }
-                }
                 if MinMax::try_from_call(func, keywords, semantic) == Some(min_max) {
+                    if let [arg] = &**args {
+                        if arg.as_starred_expr().is_none() {
+                            let new_arg = Expr::Starred(ast::ExprStarred {
+                                value: Box::new(arg.clone()),
+                                ctx: ast::ExprContext::Load,
+                                range: TextRange::default(),
+                            });
+                            new_args.push(new_arg);
+                            continue;
+                        }
+                    }
                     inner(min_max, args, semantic, new_args);
                     continue;
                 }
@@ -133,7 +128,7 @@ fn collect_nested_args(min_max: MinMax, args: &[Expr], semantic: &SemanticModel)
 
 /// PLW3301
 pub(crate) fn nested_min_max(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
@@ -160,12 +155,15 @@ pub(crate) fn nested_min_max(
         MinMax::try_from_call(func.as_ref(), keywords.as_ref(), checker.semantic()) == Some(min_max)
     }) {
         let mut diagnostic = Diagnostic::new(NestedMinMax { func: min_max }, expr.range());
-        if !checker.indexer().has_comments(expr, checker.locator()) {
+        if !checker
+            .comment_ranges()
+            .has_comments(expr, checker.source())
+        {
             let flattened_expr = Expr::Call(ast::ExprCall {
                 func: Box::new(func.clone()),
                 arguments: Arguments {
-                    args: collect_nested_args(min_max, args, checker.semantic()),
-                    keywords: keywords.to_owned(),
+                    args: collect_nested_args(min_max, args, checker.semantic()).into_boxed_slice(),
+                    keywords: Box::from(keywords),
                     range: TextRange::default(),
                 },
                 range: TextRange::default(),
@@ -175,6 +173,6 @@ pub(crate) fn nested_min_max(
                 expr.range(),
             )));
         }
-        checker.diagnostics.push(diagnostic);
+        checker.report_diagnostic(diagnostic);
     }
 }

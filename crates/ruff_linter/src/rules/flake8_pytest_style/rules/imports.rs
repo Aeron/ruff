@@ -1,15 +1,15 @@
 use ruff_python_ast::Stmt;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 /// ## What it does
 /// Checks for incorrect import of pytest.
 ///
 /// ## Why is this bad?
-/// `pytest` should be imported as `import pytest` and its members should be accessed in the form of
-/// `pytest.xxx.yyy` for consistency and to make it easier for linting tools to analyze the code.
+/// For consistency, `pytest` should be imported as `import pytest` and its members should be
+/// accessed in the form of `pytest.xxx.yyy` for consistency
 ///
 /// ## Example
 /// ```python
@@ -21,13 +21,13 @@ use ruff_text_size::Ranged;
 /// ```python
 /// import pytest
 /// ```
-#[violation]
-pub struct PytestIncorrectPytestImport;
+#[derive(ViolationMetadata)]
+pub(crate) struct PytestIncorrectPytestImport;
 
 impl Violation for PytestIncorrectPytestImport {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Found incorrect import of pytest, use simple `import pytest` instead")
+        "Incorrect import of `pytest`; use `import pytest` instead".to_string()
     }
 }
 
@@ -54,13 +54,11 @@ pub(crate) fn import(import_from: &Stmt, name: &str, asname: Option<&str>) -> Op
 pub(crate) fn import_from(
     import_from: &Stmt,
     module: Option<&str>,
-    level: Option<u32>,
+    level: u32,
 ) -> Option<Diagnostic> {
     // If level is not zero or module is none, return
-    if let Some(level) = level {
-        if level != 0 {
-            return None;
-        }
+    if level != 0 {
+        return None;
     };
 
     if let Some(module) = module {

@@ -1,7 +1,8 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 use ruff_python_ast::{self as ast};
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -38,31 +39,33 @@ use crate::checkers::ast::Checker;
 /// - [Why `preexec_fn` in `subprocess.Popen` may lead to deadlock?](https://discuss.python.org/t/why-preexec-fn-in-subprocess-popen-may-lead-to-deadlock/16908/2)
 ///
 /// [targeted for deprecation]: https://github.com/python/cpython/issues/82616
-#[violation]
-pub struct SubprocessPopenPreexecFn;
+#[derive(ViolationMetadata)]
+pub(crate) struct SubprocessPopenPreexecFn;
 
 impl Violation for SubprocessPopenPreexecFn {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`preexec_fn` argument is unsafe when using threads")
+        "`preexec_fn` argument is unsafe when using threads".to_string()
     }
 }
 
 /// PLW1509
-pub(crate) fn subprocess_popen_preexec_fn(checker: &mut Checker, call: &ast::ExprCall) {
+pub(crate) fn subprocess_popen_preexec_fn(checker: &Checker, call: &ast::ExprCall) {
+    if !checker.semantic().seen_module(Modules::SUBPROCESS) {
+        return;
+    }
+
     if checker
         .semantic()
-        .resolve_call_path(&call.func)
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["subprocess", "Popen"]))
+        .resolve_qualified_name(&call.func)
+        .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["subprocess", "Popen"]))
     {
         if let Some(keyword) = call
             .arguments
             .find_keyword("preexec_fn")
             .filter(|keyword| !keyword.value.is_none_literal_expr())
         {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(SubprocessPopenPreexecFn, keyword.range()));
+            checker.report_diagnostic(Diagnostic::new(SubprocessPopenPreexecFn, keyword.range()));
         }
     }
 }

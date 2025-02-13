@@ -1,6 +1,6 @@
 [package]
 name = "ruff_wasm"
-version = "0.0.0"
+version = "0.9.6"
 publish = false
 authors = { workspace = true }
 edition = { workspace = true }
@@ -13,35 +13,37 @@ description = "WebAssembly bindings for Ruff"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false
 
 [features]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-ruff_linter = { path = "../ruff_linter" }
-ruff_diagnostics = { path = "../ruff_diagnostics" }
-ruff_python_ast = { path = "../ruff_python_ast" }
-ruff_python_codegen = { path = "../ruff_python_codegen" }
-ruff_formatter = { path = "../ruff_formatter" }
-ruff_python_formatter = { path = "../ruff_python_formatter" }
-ruff_python_index = { path = "../ruff_python_index" }
-ruff_python_parser = { path = "../ruff_python_parser" }
-ruff_source_file = { path = "../ruff_source_file" }
-ruff_text_size = { path = "../ruff_text_size" }
-ruff_python_trivia = { path = "../ruff_python_trivia" }
-ruff_workspace = { path = "../ruff_workspace" }
+ruff_linter = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_python_codegen = { workspace = true }
+ruff_formatter = { workspace = true }
+ruff_python_formatter = { workspace = true }
+ruff_python_index = { workspace = true }
+ruff_python_parser = { workspace = true }
+ruff_python_trivia = { workspace = true }
+ruff_source_file = { workspace = true }
+ruff_text_size = { workspace = true }
+ruff_workspace = { workspace = true }
 
-console_error_panic_hook = { version = "0.1.7", optional = true }
-console_log = { version = "1.0.0" }
+console_error_panic_hook = { workspace = true, optional = true }
+console_log = { workspace = true }
+js-sys = { workspace = true }
 log = { workspace = true }
-
+# Not a direct dependency but required to enable the `wasm_js` feature.
+# See https://docs.rs/getrandom/latest/getrandom/#webassembly-support
+getrandom = { workspace = true, features = ["wasm_js"] }
 serde = { workspace = true }
-serde-wasm-bindgen = { version = "0.6.1" }
-wasm-bindgen = { version = "0.2.84" }
-js-sys = { version = "0.3.65" }
+serde-wasm-bindgen = { workspace = true }
+wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
-wasm-bindgen-test = { version = "0.3.34" }
+wasm-bindgen-test = { workspace = true }
 
 [lints]
 workspace = true

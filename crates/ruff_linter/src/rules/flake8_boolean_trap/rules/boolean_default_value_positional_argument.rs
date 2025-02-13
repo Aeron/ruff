@@ -1,8 +1,9 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::call_path::collect_call_path;
-use ruff_python_ast::{Decorator, ParameterWithDefault, Parameters};
-use ruff_text_size::Ranged;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::identifier::Identifier;
+use ruff_python_ast::name::UnqualifiedName;
+use ruff_python_ast::{Decorator, Expr, Parameters};
+use ruff_python_semantic::analyze::visibility;
 
 use crate::checkers::ast::Checker;
 use crate::rules::flake8_boolean_trap::helpers::is_allowed_func_def;
@@ -65,7 +66,11 @@ use crate::rules::flake8_boolean_trap::helpers::is_allowed_func_def;
 ///
 ///
 /// def round_number(value, method):
-///     ...
+///     return ceil(number) if method is RoundingMethod.UP else floor(number)
+///
+///
+/// round_number(1.5, RoundingMethod.UP)
+/// round_number(1.5, RoundingMethod.DOWN)
 /// ```
 ///
 /// Or, make the argument a keyword-only argument:
@@ -84,46 +89,51 @@ use crate::rules::flake8_boolean_trap::helpers::is_allowed_func_def;
 /// ## References
 /// - [Python documentation: Calls](https://docs.python.org/3/reference/expressions.html#calls)
 /// - [_How to Avoid “The Boolean Trap”_ by Adam Johnson](https://adamj.eu/tech/2021/07/10/python-type-hints-how-to-avoid-the-boolean-trap/)
-#[violation]
-pub struct BooleanDefaultValuePositionalArgument;
+#[derive(ViolationMetadata)]
+pub(crate) struct BooleanDefaultValuePositionalArgument;
 
 impl Violation for BooleanDefaultValuePositionalArgument {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Boolean default positional argument in function definition")
+        "Boolean default positional argument in function definition".to_string()
     }
 }
 
+/// FBT002
 pub(crate) fn boolean_default_value_positional_argument(
-    checker: &mut Checker,
+    checker: &Checker,
     name: &str,
     decorator_list: &[Decorator],
     parameters: &Parameters,
 ) {
+    // https://github.com/astral-sh/ruff/issues/14535
+    if checker.source_type.is_stub() {
+        return;
+    }
+    // Allow Boolean defaults in explicitly-allowed functions.
     if is_allowed_func_def(name) {
         return;
     }
 
-    if decorator_list.iter().any(|decorator| {
-        collect_call_path(&decorator.expression)
-            .is_some_and(|call_path| call_path.as_slice() == [name, "setter"])
-    }) {
-        return;
-    }
+    for param in parameters.posonlyargs.iter().chain(&parameters.args) {
+        if param.default().is_some_and(Expr::is_boolean_literal_expr) {
+            // Allow Boolean defaults in setters.
+            if decorator_list.iter().any(|decorator| {
+                UnqualifiedName::from_expr(&decorator.expression)
+                    .is_some_and(|unqualified_name| unqualified_name.segments() == [name, "setter"])
+            }) {
+                return;
+            }
 
-    for ParameterWithDefault {
-        parameter,
-        default,
-        range: _,
-    } in parameters.posonlyargs.iter().chain(&parameters.args)
-    {
-        if default
-            .as_ref()
-            .is_some_and(|default| default.is_boolean_literal_expr())
-        {
-            checker.diagnostics.push(Diagnostic::new(
+            // Allow Boolean defaults in `@override` methods, since they're required to adhere to
+            // the parent signature.
+            if visibility::is_override(decorator_list, checker.semantic()) {
+                return;
+            }
+
+            checker.report_diagnostic(Diagnostic::new(
                 BooleanDefaultValuePositionalArgument,
-                parameter.name.range(),
+                param.identifier(),
             ));
         }
     }

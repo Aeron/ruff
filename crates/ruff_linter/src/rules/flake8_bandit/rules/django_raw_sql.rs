@@ -1,6 +1,7 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr};
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -23,36 +24,38 @@ use crate::checkers::ast::Checker;
 /// ## References
 /// - [Django documentation: SQL injection protection](https://docs.djangoproject.com/en/dev/topics/security/#sql-injection-protection)
 /// - [Common Weakness Enumeration: CWE-89](https://cwe.mitre.org/data/definitions/89.html)
-#[violation]
-pub struct DjangoRawSql;
+#[derive(ViolationMetadata)]
+pub(crate) struct DjangoRawSql;
 
 impl Violation for DjangoRawSql {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use of `RawSQL` can lead to SQL injection vulnerabilities")
+        "Use of `RawSQL` can lead to SQL injection vulnerabilities".to_string()
     }
 }
 
 /// S611
-pub(crate) fn django_raw_sql(checker: &mut Checker, call: &ast::ExprCall) {
+pub(crate) fn django_raw_sql(checker: &Checker, call: &ast::ExprCall) {
+    if !checker.semantic().seen_module(Modules::DJANGO) {
+        return;
+    }
+
     if checker
         .semantic()
-        .resolve_call_path(&call.func)
-        .is_some_and(|call_path| {
+        .resolve_qualified_name(&call.func)
+        .is_some_and(|qualified_name| {
             matches!(
-                call_path.as_slice(),
+                qualified_name.segments(),
                 ["django", "db", "models", "expressions", "RawSQL"]
             )
         })
     {
         if !call
             .arguments
-            .find_argument("sql", 0)
+            .find_argument_value("sql", 0)
             .is_some_and(Expr::is_string_literal_expr)
         {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(DjangoRawSql, call.func.range()));
+            checker.report_diagnostic(Diagnostic::new(DjangoRawSql, call.func.range()));
         }
     }
 }

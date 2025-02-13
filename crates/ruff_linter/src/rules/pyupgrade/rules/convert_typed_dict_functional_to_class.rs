@@ -1,10 +1,12 @@
-use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_diagnostics::{Applicability, Diagnostic, Edit, Fix, FixAvailability, Violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::{self as ast, Arguments, Expr, ExprContext, Identifier, Keyword, Stmt};
 use ruff_python_codegen::Generator;
 use ruff_python_semantic::SemanticModel;
 use ruff_python_stdlib::identifiers::is_identifier;
+use ruff_python_trivia::CommentRanges;
+use ruff_source_file::LineRanges;
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -36,10 +38,15 @@ use crate::checkers::ast::Checker;
 ///     b: str
 /// ```
 ///
+/// ## Fix safety
+/// This rule's fix is marked as unsafe if there are any comments within the
+/// range of the `TypedDict` definition, as these will be dropped by the
+/// autofix.
+///
 /// ## References
 /// - [Python documentation: `typing.TypedDict`](https://docs.python.org/3/library/typing.html#typing.TypedDict)
-#[violation]
-pub struct ConvertTypedDictFunctionalToClass {
+#[derive(ViolationMetadata)]
+pub(crate) struct ConvertTypedDictFunctionalToClass {
     name: String,
 }
 
@@ -60,7 +67,7 @@ impl Violation for ConvertTypedDictFunctionalToClass {
 
 /// UP013
 pub(crate) fn convert_typed_dict_functional_to_class(
-    checker: &mut Checker,
+    checker: &Checker,
     stmt: &Stmt,
     targets: &[Expr],
     value: &Expr,
@@ -90,9 +97,10 @@ pub(crate) fn convert_typed_dict_functional_to_class(
             total_keyword,
             base_class,
             checker.generator(),
+            checker.comment_ranges(),
         ));
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Return the class name, arguments, keywords and base class for a `TypedDict`
@@ -148,10 +156,10 @@ fn create_class_def_stmt(
     ast::StmtClassDef {
         name: Identifier::new(class_name.to_string(), TextRange::default()),
         arguments: Some(Box::new(Arguments {
-            args: vec![base_class.clone()],
+            args: Box::from([base_class.clone()]),
             keywords: match total_keyword {
-                Some(keyword) => vec![keyword.clone()],
-                None => vec![],
+                Some(keyword) => Box::from([keyword.clone()]),
+                None => Box::from([]),
             },
             range: TextRange::default(),
         })),
@@ -163,24 +171,24 @@ fn create_class_def_stmt(
     .into()
 }
 
-fn fields_from_dict_literal(keys: &[Option<Expr>], values: &[Expr]) -> Option<Vec<Stmt>> {
-    if keys.is_empty() {
+fn fields_from_dict_literal(items: &[ast::DictItem]) -> Option<Vec<Stmt>> {
+    if items.is_empty() {
         let node = Stmt::Pass(ast::StmtPass {
             range: TextRange::default(),
         });
         Some(vec![node])
     } else {
-        keys.iter()
-            .zip(values.iter())
-            .map(|(key, value)| match key {
+        items
+            .iter()
+            .map(|ast::DictItem { key, value }| match key {
                 Some(Expr::StringLiteral(ast::ExprStringLiteral { value: field, .. })) => {
-                    if !is_identifier(field) {
+                    if !is_identifier(field.to_str()) {
                         return None;
                     }
-                    if is_dunder(field) {
+                    if is_dunder(field.to_str()) {
                         return None;
                     }
-                    Some(create_field_assignment_stmt(field, value))
+                    Some(create_field_assignment_stmt(field.to_str(), value))
                 }
                 _ => None,
             })
@@ -226,16 +234,14 @@ fn fields_from_keywords(keywords: &[Keyword]) -> Option<Vec<Stmt>> {
 
 /// Match the fields and `total` keyword from a `TypedDict` call.
 fn match_fields_and_total(arguments: &Arguments) -> Option<(Vec<Stmt>, Option<&Keyword>)> {
-    match (arguments.args.as_slice(), arguments.keywords.as_slice()) {
+    match (&*arguments.args, &*arguments.keywords) {
         // Ex) `TypedDict("MyType", {"a": int, "b": str})`
         ([_typename, fields], [..]) => {
             let total = arguments.find_keyword("total");
             match fields {
-                Expr::Dict(ast::ExprDict {
-                    keys,
-                    values,
-                    range: _,
-                }) => Some((fields_from_dict_literal(keys, values)?, total)),
+                Expr::Dict(ast::ExprDict { items, range: _ }) => {
+                    Some((fields_from_dict_literal(items)?, total))
+                }
                 Expr::Call(ast::ExprCall {
                     func,
                     arguments: Arguments { keywords, .. },
@@ -266,14 +272,22 @@ fn convert_to_class(
     total_keyword: Option<&Keyword>,
     base_class: &Expr,
     generator: Generator,
+    comment_ranges: &CommentRanges,
 ) -> Fix {
-    Fix::safe_edit(Edit::range_replacement(
-        generator.stmt(&create_class_def_stmt(
-            class_name,
-            body,
-            total_keyword,
-            base_class,
-        )),
-        stmt.range(),
-    ))
+    Fix::applicable_edit(
+        Edit::range_replacement(
+            generator.stmt(&create_class_def_stmt(
+                class_name,
+                body,
+                total_keyword,
+                base_class,
+            )),
+            stmt.range(),
+        ),
+        if comment_ranges.intersects(stmt.range()) {
+            Applicability::Unsafe
+        } else {
+            Applicability::Safe
+        },
+    )
 }

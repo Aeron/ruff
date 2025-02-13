@@ -1,11 +1,15 @@
 //! Settings for the `pydocstyle` plugin.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::iter::FusedIterator;
 
 use serde::{Deserialize, Serialize};
 
 use ruff_macros::CacheKey;
+use ruff_python_ast::name::QualifiedName;
 
+use crate::display_settings;
 use crate::registry::Rule;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, CacheKey)]
@@ -24,56 +28,132 @@ impl Convention {
     pub const fn rules_to_be_ignored(self) -> &'static [Rule] {
         match self {
             Convention::Google => &[
-                Rule::OneBlankLineBeforeClass,
-                Rule::OneBlankLineAfterClass,
+                Rule::IncorrectBlankLineBeforeClass,
+                Rule::IncorrectBlankLineAfterClass,
                 Rule::MultiLineSummarySecondLine,
-                Rule::SectionUnderlineNotOverIndented,
-                Rule::EndsInPeriod,
+                Rule::OverindentedSectionUnderline,
+                Rule::MissingTrailingPeriod,
                 Rule::NonImperativeMood,
                 Rule::DocstringStartsWithThis,
-                Rule::NewLineAfterSectionName,
-                Rule::DashedUnderlineAfterSection,
-                Rule::SectionUnderlineAfterName,
-                Rule::SectionUnderlineMatchesSectionLength,
-                Rule::BlankLineAfterLastSection,
+                Rule::MissingNewLineAfterSectionName,
+                Rule::MissingDashedUnderlineAfterSection,
+                Rule::MissingSectionUnderlineAfterName,
+                Rule::MismatchedSectionUnderlineLength,
+                Rule::MissingBlankLineAfterLastSection,
             ],
             Convention::Numpy => &[
                 Rule::UndocumentedPublicInit,
-                Rule::OneBlankLineBeforeClass,
+                Rule::IncorrectBlankLineBeforeClass,
                 Rule::MultiLineSummaryFirstLine,
                 Rule::MultiLineSummarySecondLine,
-                Rule::NoSignature,
-                Rule::BlankLineAfterLastSection,
-                Rule::EndsInPunctuation,
-                Rule::SectionNameEndsInColon,
+                Rule::SignatureInDocstring,
+                Rule::MissingBlankLineAfterLastSection,
+                Rule::MissingTerminalPunctuation,
+                Rule::MissingSectionNameColon,
                 Rule::UndocumentedParam,
             ],
             Convention::Pep257 => &[
-                Rule::OneBlankLineBeforeClass,
+                Rule::IncorrectBlankLineBeforeClass,
                 Rule::MultiLineSummaryFirstLine,
                 Rule::MultiLineSummarySecondLine,
-                Rule::SectionNotOverIndented,
-                Rule::SectionUnderlineNotOverIndented,
+                Rule::OverindentedSection,
+                Rule::OverindentedSectionUnderline,
                 Rule::DocstringStartsWithThis,
-                Rule::CapitalizeSectionName,
-                Rule::NewLineAfterSectionName,
-                Rule::DashedUnderlineAfterSection,
-                Rule::SectionUnderlineAfterName,
-                Rule::SectionUnderlineMatchesSectionLength,
+                Rule::NonCapitalizedSectionName,
+                Rule::MissingNewLineAfterSectionName,
+                Rule::MissingDashedUnderlineAfterSection,
+                Rule::MissingSectionUnderlineAfterName,
+                Rule::MismatchedSectionUnderlineLength,
                 Rule::NoBlankLineAfterSection,
                 Rule::NoBlankLineBeforeSection,
-                Rule::BlankLineAfterLastSection,
-                Rule::EndsInPunctuation,
-                Rule::SectionNameEndsInColon,
+                Rule::MissingBlankLineAfterLastSection,
+                Rule::MissingTerminalPunctuation,
+                Rule::MissingSectionNameColon,
                 Rule::UndocumentedParam,
             ],
         }
     }
 }
 
-#[derive(Debug, Default, CacheKey)]
+impl fmt::Display for Convention {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Google => write!(f, "google"),
+            Self::Numpy => write!(f, "numpy"),
+            Self::Pep257 => write!(f, "pep257"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, CacheKey)]
 pub struct Settings {
     pub convention: Option<Convention>,
     pub ignore_decorators: BTreeSet<String>,
     pub property_decorators: BTreeSet<String>,
+    pub ignore_var_parameters: bool,
+}
+
+impl Settings {
+    pub fn convention(&self) -> Option<Convention> {
+        self.convention
+    }
+
+    pub fn ignore_decorators(&self) -> DecoratorIterator {
+        DecoratorIterator::new(&self.ignore_decorators)
+    }
+
+    pub fn property_decorators(&self) -> DecoratorIterator {
+        DecoratorIterator::new(&self.property_decorators)
+    }
+
+    pub fn ignore_var_parameters(&self) -> bool {
+        self.ignore_var_parameters
+    }
+}
+
+impl fmt::Display for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        display_settings! {
+            formatter = f,
+            namespace = "linter.pydocstyle",
+            fields = [
+                self.convention | optional,
+                self.ignore_decorators | set,
+                self.property_decorators | set,
+                self.ignore_var_parameters
+            ]
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecoratorIterator<'a> {
+    decorators: std::collections::btree_set::Iter<'a, String>,
+}
+
+impl<'a> DecoratorIterator<'a> {
+    fn new(decorators: &'a BTreeSet<String>) -> Self {
+        Self {
+            decorators: decorators.iter(),
+        }
+    }
+}
+
+impl<'a> Iterator for DecoratorIterator<'a> {
+    type Item = QualifiedName<'a>;
+
+    fn next(&mut self) -> Option<QualifiedName<'a>> {
+        self.decorators
+            .next()
+            .map(|deco| QualifiedName::from_dotted_name(deco))
+    }
+}
+
+impl FusedIterator for DecoratorIterator<'_> {}
+
+impl ExactSizeIterator for DecoratorIterator<'_> {
+    fn len(&self) -> usize {
+        self.decorators.len()
+    }
 }

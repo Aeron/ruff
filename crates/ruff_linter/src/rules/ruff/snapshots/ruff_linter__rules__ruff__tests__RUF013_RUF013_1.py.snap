@@ -1,9 +1,10 @@
 ---
 source: crates/ruff_linter/src/rules/ruff/mod.rs
+snapshot_kind: text
 ---
 RUF013_1.py:4:12: RUF013 [*] PEP 484 prohibits implicit `Optional`
   |
-4 | def f(arg: int = None):  # RUF011
+4 | def f(arg: int = None):  # RUF013
   |            ^^^ RUF013
 5 |     pass
   |
@@ -13,8 +14,6 @@ RUF013_1.py:4:12: RUF013 [*] PEP 484 prohibits implicit `Optional`
 1 1 | # No `typing.Optional` import
 2 2 | 
 3 3 | 
-4   |-def f(arg: int = None):  # RUF011
-  4 |+def f(arg: int | None = None):  # RUF011
+4   |-def f(arg: int = None):  # RUF013
+  4 |+def f(arg: int | None = None):  # RUF013
 5 5 |     pass
-
-

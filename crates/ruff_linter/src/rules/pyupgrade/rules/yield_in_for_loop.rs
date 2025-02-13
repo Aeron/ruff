@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::parenthesize::parenthesized_range;
 use ruff_python_ast::{self as ast, Expr, Stmt};
 use ruff_text_size::Ranged;
@@ -24,16 +24,26 @@ use crate::checkers::ast::Checker;
 /// yield from foo
 /// ```
 ///
+/// ## Fix safety
+/// This rule's fix is marked as unsafe, as converting a `for` loop to a `yield
+/// from` expression can change the behavior of the program in rare cases.
+/// For example, if a generator is being sent values via `send`, then rewriting
+/// to a `yield from` could lead to an attribute error if the underlying
+/// generator does not implement the `send` method.
+///
+/// In most cases, however, the fix is safe, and such a modification should have
+/// no effect on the behavior of the program.
+///
 /// ## References
 /// - [Python documentation: The `yield` statement](https://docs.python.org/3/reference/simple_stmts.html#the-yield-statement)
-/// - [PEP 380](https://peps.python.org/pep-0380/)
-#[violation]
-pub struct YieldInForLoop;
+/// - [PEP 380 – Syntax for Delegating to a Subgenerator](https://peps.python.org/pep-0380/)
+#[derive(ViolationMetadata)]
+pub(crate) struct YieldInForLoop;
 
 impl AlwaysFixableViolation for YieldInForLoop {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Replace `yield` over `for` loop with `yield from`")
+        "Replace `yield` over `for` loop with `yield from`".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -42,7 +52,7 @@ impl AlwaysFixableViolation for YieldInForLoop {
 }
 
 /// UP028
-pub(crate) fn yield_in_for_loop(checker: &mut Checker, stmt_for: &ast::StmtFor) {
+pub(crate) fn yield_in_for_loop(checker: &Checker, stmt_for: &ast::StmtFor) {
     // Intentionally omit async contexts.
     if checker.semantic().in_async_context() {
         return;
@@ -91,7 +101,9 @@ pub(crate) fn yield_in_for_loop(checker: &mut Checker, stmt_for: &ast::StmtFor) 
             .semantic()
             .current_scope()
             .get_all(name.id.as_str())
-            .any(|binding_id| {
+            // Skip unbound bindings like `del x`
+            .find(|&id| !checker.semantic().binding(id).is_unbound())
+            .is_some_and(|binding_id| {
                 let binding = checker.semantic().binding(binding_id);
                 binding.references.iter().any(|reference_id| {
                     checker.semantic().reference(*reference_id).range() != name.range()
@@ -102,21 +114,27 @@ pub(crate) fn yield_in_for_loop(checker: &mut Checker, stmt_for: &ast::StmtFor) 
     }
 
     let mut diagnostic = Diagnostic::new(YieldInForLoop, stmt_for.range());
+
     let contents = checker.locator().slice(
         parenthesized_range(
             iter.as_ref().into(),
             stmt_for.into(),
-            checker.indexer().comment_ranges(),
+            checker.comment_ranges(),
             checker.locator().contents(),
         )
         .unwrap_or(iter.range()),
     );
-    let contents = format!("yield from {contents}");
+    let contents = if iter.as_tuple_expr().is_some_and(|it| !it.parenthesized) {
+        format!("yield from ({contents})")
+    } else {
+        format!("yield from {contents}")
+    };
+
     diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
         contents,
         stmt_for.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Return `true` if the two expressions are equivalent, and both consistent solely
@@ -125,11 +143,10 @@ fn is_same_expr(left: &Expr, right: &Expr) -> bool {
     match (&left, &right) {
         (Expr::Name(left), Expr::Name(right)) => left.id == right.id,
         (Expr::Tuple(left), Expr::Tuple(right)) => {
-            left.elts.len() == right.elts.len()
+            left.len() == right.len()
                 && left
-                    .elts
                     .iter()
-                    .zip(right.elts.iter())
+                    .zip(right)
                     .all(|(left, right)| is_same_expr(left, right))
         }
         _ => false,
@@ -138,12 +155,12 @@ fn is_same_expr(left: &Expr, right: &Expr) -> bool {
 
 /// Collect all named variables in an expression consisting solely of tuples and
 /// names.
-fn collect_names<'a>(expr: &'a Expr) -> Box<dyn Iterator<Item = &ast::ExprName> + 'a> {
+fn collect_names<'a>(expr: &'a Expr) -> Box<dyn Iterator<Item = &'a ast::ExprName> + 'a> {
     Box::new(
         expr.as_name_expr().into_iter().chain(
             expr.as_tuple_expr()
                 .into_iter()
-                .flat_map(|tuple| tuple.elts.iter().flat_map(collect_names)),
+                .flat_map(|tuple| tuple.iter().flat_map(collect_names)),
         ),
     )
 }

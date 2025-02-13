@@ -1,6 +1,6 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::{self as ast, Expr, Parameter, ParameterWithDefault, Stmt};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr, Stmt};
 use ruff_text_size::{Ranged, TextSize};
 
 use crate::checkers::ast::Checker;
@@ -43,13 +43,13 @@ use crate::checkers::ast::Checker;
 /// ## References
 /// - [Python documentation: `super`](https://docs.python.org/3/library/functions.html#super)
 /// - [super/MRO, Python's most misunderstood feature.](https://www.youtube.com/watch?v=X1PQ7zzltz4)
-#[violation]
-pub struct SuperCallWithParameters;
+#[derive(ViolationMetadata)]
+pub(crate) struct SuperCallWithParameters;
 
 impl AlwaysFixableViolation for SuperCallWithParameters {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `super()` instead of `super(__class__, self)`")
+        "Use `super()` instead of `super(__class__, self)`".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -58,7 +58,7 @@ impl AlwaysFixableViolation for SuperCallWithParameters {
 }
 
 /// UP008
-pub(crate) fn super_call_with_parameters(checker: &mut Checker, call: &ast::ExprCall) {
+pub(crate) fn super_call_with_parameters(checker: &Checker, call: &ast::ExprCall) {
     // Only bother going through the super check at all if we're in a `super` call.
     // (We check this in `super_args` too, so this is just an optimization.)
     if !is_super_call_with_arguments(call) {
@@ -76,7 +76,7 @@ pub(crate) fn super_call_with_parameters(checker: &mut Checker, call: &ast::Expr
     // For a `super` invocation to be unnecessary, the first argument needs to match
     // the enclosing class, and the second argument needs to match the first
     // argument to the enclosing function.
-    let [first_arg, second_arg] = call.arguments.args.as_slice() else {
+    let [first_arg, second_arg] = &*call.arguments.args else {
         return;
     };
 
@@ -90,19 +90,15 @@ pub(crate) fn super_call_with_parameters(checker: &mut Checker, call: &ast::Expr
     };
 
     // Extract the name of the first argument to the enclosing function.
-    let Some(ParameterWithDefault {
-        parameter: Parameter {
-            name: parent_arg, ..
-        },
-        ..
-    }) = parent_parameters.args.first()
-    else {
+    let Some(parent_arg) = parent_parameters.args.first() else {
         return;
     };
 
     // Find the enclosing class definition (if any).
     let Some(Stmt::ClassDef(ast::StmtClassDef {
-        name: parent_name, ..
+        name: parent_name,
+        decorator_list,
+        ..
     })) = parents.find(|stmt| stmt.is_class_def_stmt())
     else {
         return;
@@ -120,18 +116,48 @@ pub(crate) fn super_call_with_parameters(checker: &mut Checker, call: &ast::Expr
         return;
     };
 
-    if !(first_arg_id == parent_name.as_str() && second_arg_id == parent_arg.as_str()) {
+    if !(first_arg_id == parent_name.as_str() && second_arg_id == parent_arg.name().as_str()) {
         return;
     }
 
     drop(parents);
+
+    // If the class is an `@dataclass` with `slots=True`, calling `super()` without arguments raises
+    // a `TypeError`.
+    //
+    // See: https://docs.python.org/3/library/dataclasses.html#dataclasses.dataclass
+    if decorator_list.iter().any(|decorator| {
+        let Expr::Call(ast::ExprCall {
+            func, arguments, ..
+        }) = &decorator.expression
+        else {
+            return false;
+        };
+
+        if checker
+            .semantic()
+            .resolve_qualified_name(func)
+            .is_some_and(|name| name.segments() == ["dataclasses", "dataclass"])
+        {
+            arguments.find_keyword("slots").is_some_and(|keyword| {
+                matches!(
+                    keyword.value,
+                    Expr::BooleanLiteral(ast::ExprBooleanLiteral { value: true, .. })
+                )
+            })
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
 
     let mut diagnostic = Diagnostic::new(SuperCallWithParameters, call.arguments.range());
     diagnostic.set_fix(Fix::unsafe_edit(Edit::deletion(
         call.arguments.start() + TextSize::new(1),
         call.arguments.end() - TextSize::new(1),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Returns `true` if a call is an argumented `super` invocation.

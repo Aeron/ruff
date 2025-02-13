@@ -1,6 +1,6 @@
-use ruff_diagnostics::Violation;
-use ruff_macros::{derive_message_formats, violation};
-use ruff_source_file::OneIndexed;
+use ruff_diagnostics::{FixAvailability, Violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_source_file::SourceRow;
 
 /// ## What it does
 /// Checks for variable definitions that redefine (or "shadow") unused
@@ -22,16 +22,23 @@ use ruff_source_file::OneIndexed;
 /// import foo
 /// import bar
 /// ```
-#[violation]
-pub struct RedefinedWhileUnused {
+#[derive(ViolationMetadata)]
+pub(crate) struct RedefinedWhileUnused {
     pub name: String,
-    pub line: OneIndexed,
+    pub row: SourceRow,
 }
 
 impl Violation for RedefinedWhileUnused {
+    const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
-        let RedefinedWhileUnused { name, line } = self;
-        format!("Redefinition of unused `{name}` from line {line}")
+        let RedefinedWhileUnused { name, row } = self;
+        format!("Redefinition of unused `{name}` from {row}")
+    }
+
+    fn fix_title(&self) -> Option<String> {
+        let RedefinedWhileUnused { name, .. } = self;
+        Some(format!("Remove definition: `{name}`"))
     }
 }

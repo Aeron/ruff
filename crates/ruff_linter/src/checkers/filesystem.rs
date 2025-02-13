@@ -1,19 +1,21 @@
 use std::path::Path;
 
 use ruff_diagnostics::Diagnostic;
-use ruff_python_index::Indexer;
-use ruff_source_file::Locator;
+use ruff_python_trivia::CommentRanges;
 
+use crate::package::PackageRoot;
 use crate::registry::Rule;
+use crate::rules::flake8_builtins::rules::stdlib_module_shadowing;
 use crate::rules::flake8_no_pep420::rules::implicit_namespace_package;
 use crate::rules::pep8_naming::rules::invalid_module_name;
 use crate::settings::LinterSettings;
+use crate::Locator;
 
 pub(crate) fn check_file_path(
     path: &Path,
-    package: Option<&Path>,
+    package: Option<PackageRoot<'_>>,
     locator: &Locator,
-    indexer: &Indexer,
+    comment_ranges: &CommentRanges,
     settings: &LinterSettings,
 ) -> Vec<Diagnostic> {
     let mut diagnostics: Vec<Diagnostic> = vec![];
@@ -24,9 +26,10 @@ pub(crate) fn check_file_path(
             path,
             package,
             locator,
-            indexer,
+            comment_ranges,
             &settings.project_root,
             &settings.src,
+            settings.preview,
         ) {
             diagnostics.push(diagnostic);
         }
@@ -37,6 +40,13 @@ pub(crate) fn check_file_path(
         if let Some(diagnostic) =
             invalid_module_name(path, package, &settings.pep8_naming.ignore_names)
         {
+            diagnostics.push(diagnostic);
+        }
+    }
+
+    // flake8-builtins
+    if settings.rules.enabled(Rule::StdlibModuleShadowing) {
+        if let Some(diagnostic) = stdlib_module_shadowing(path, settings) {
             diagnostics.push(diagnostic);
         }
     }

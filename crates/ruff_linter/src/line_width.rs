@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fmt;
 use std::hash::Hasher;
 use std::num::{NonZeroU16, NonZeroU8, ParseIntError};
 use std::str::FromStr;
@@ -39,6 +40,12 @@ impl Default for LineLength {
     }
 }
 
+impl fmt::Display for LineLength {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
 impl CacheKey for LineLength {
     fn cache_key(&self, state: &mut CacheKeyHasher) {
         state.write_u16(self.0.get());
@@ -49,7 +56,7 @@ impl CacheKey for LineLength {
 pub enum ParseLineWidthError {
     /// The string could not be parsed as a valid [u16]
     ParseError(ParseIntError),
-    /// The [u16] value of the string is not a valid [LineLength]
+    /// The [u16] value of the string is not a valid [`LineLength`]
     TryFromIntError(LineLengthFromIntError),
 }
 
@@ -245,6 +252,12 @@ impl IndentWidth {
 impl Default for IndentWidth {
     fn default() -> Self {
         Self(NonZeroU8::new(4).unwrap())
+    }
+}
+
+impl fmt::Display for IndentWidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 

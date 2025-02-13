@@ -3,6 +3,7 @@
 """See CONTRIBUTING.md"""
 
 # %%
+from __future__ import annotations
 
 import re
 from collections import defaultdict
@@ -24,16 +25,26 @@ nodes_file = (
     root.joinpath("crates")
     .joinpath("ruff_python_ast")
     .joinpath("src")
-    .joinpath("node.rs")
+    .joinpath("generated.rs")
     .read_text()
 )
 node_lines = (
-    nodes_file.split("pub enum AnyNode {")[1].split("}")[0].strip().splitlines()
+    nodes_file.split("pub enum AnyNodeRef<'a> {")[1].split("}")[0].strip().splitlines()
 )
-nodes = [
-    node_line.split("(")[1].split(")")[0].split("::")[-1].split("<")[0]
-    for node_line in node_lines
-]
+nodes = []
+for node_line in node_lines:
+    node = node_line.split("(")[1].split(")")[0].split("::")[-1].removeprefix("&'a ")
+    # `FString` has a custom implementation while the formatting for
+    # `FStringLiteralElement`, `FStringFormatSpec` and `FStringExpressionElement` are
+    # handled by the `FString` implementation.
+    if node in (
+        "FStringLiteralElement",
+        "FStringExpressionElement",
+        "FStringFormatSpec",
+        "Identifier",
+    ):
+        continue
+    nodes.append(node)
 print(nodes)
 
 # %%
@@ -102,7 +113,7 @@ for group, group_nodes in nodes_grouped.items():
                     write!(f, [verbatim_text(item)])
                 }}
             }}
-            """.strip()  # noqa: E501
+            """.strip()
 
         node_path.write_text(rustfmt(code))
 
@@ -117,7 +128,7 @@ use crate::{AsFormat, FormatNodeRule, IntoFormat, PyFormatter};
 use ruff_formatter::{FormatOwnedWithRule, FormatRefWithRule, FormatResult, FormatRule};
 use ruff_python_ast as ast;
 
-"""  # noqa: E501
+"""
 for node in nodes:
     text = f"""
         impl FormatRule<ast::{node}, PyFormatContext<'_>>
@@ -159,7 +170,7 @@ for node in nodes:
                 )
             }}
         }}
-    """  # noqa: E501
+    """
     generated += text
 
 out.write_text(rustfmt(generated))

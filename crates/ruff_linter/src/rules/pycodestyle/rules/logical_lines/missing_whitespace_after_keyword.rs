@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_parser::TokenKind;
 use ruff_text_size::Ranged;
 
@@ -26,17 +26,17 @@ use crate::rules::pycodestyle::rules::logical_lines::LogicalLine;
 ///
 /// ## References
 /// - [Python documentation: Keywords](https://docs.python.org/3/reference/lexical_analysis.html#keywords)
-#[violation]
-pub struct MissingWhitespaceAfterKeyword;
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingWhitespaceAfterKeyword;
 
 impl AlwaysFixableViolation for MissingWhitespaceAfterKeyword {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Missing whitespace after keyword")
+        "Missing whitespace after keyword".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Added missing whitespace after keyword")
+        "Added missing whitespace after keyword".to_string()
     }
 }
 
@@ -56,10 +56,18 @@ pub(crate) fn missing_whitespace_after_keyword(
             && !(tok0_kind.is_singleton()
                 || matches!(tok0_kind, TokenKind::Async | TokenKind::Await)
                 || tok0_kind == TokenKind::Except && tok1_kind == TokenKind::Star
-                || tok0_kind == TokenKind::Yield && tok1_kind == TokenKind::Rpar
+                || tok0_kind == TokenKind::Yield
+                    && matches!(tok1_kind, TokenKind::Rpar | TokenKind::Comma)
                 || matches!(
                     tok1_kind,
-                    TokenKind::Colon | TokenKind::Newline | TokenKind::NonLogicalNewline
+                    TokenKind::Colon
+                        | TokenKind::Semi
+                        | TokenKind::Newline
+                        | TokenKind::NonLogicalNewline
+                        // In the event of a syntax error, do not attempt to add a whitespace.
+                        | TokenKind::Rpar
+                        | TokenKind::Rsqb
+                        | TokenKind::Rbrace
                 ))
             && tok0.end() == tok1.start()
         {

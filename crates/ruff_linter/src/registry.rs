@@ -64,9 +64,6 @@ pub enum Linter {
     /// [flake8-async](https://pypi.org/project/flake8-async/)
     #[prefix = "ASYNC"]
     Flake8Async,
-    /// [flake8-trio](https://pypi.org/project/flake8-trio/)
-    #[prefix = "TRIO"]
-    Flake8Trio,
     /// [flake8-bandit](https://pypi.org/project/flake8-bandit/)
     #[prefix = "S"]
     Flake8Bandit,
@@ -115,6 +112,9 @@ pub enum Linter {
     /// [flake8-import-conventions](https://github.com/joaopalmeiro/flake8-import-conventions)
     #[prefix = "ICN"]
     Flake8ImportConventions,
+    /// [flake8-logging](https://pypi.org/project/flake8-logging/)
+    #[prefix = "LOG"]
+    Flake8Logging,
     /// [flake8-logging-format](https://pypi.org/project/flake8-logging-format/)
     #[prefix = "G"]
     Flake8LoggingFormat,
@@ -155,7 +155,7 @@ pub enum Linter {
     #[prefix = "TID"]
     Flake8TidyImports,
     /// [flake8-type-checking](https://pypi.org/project/flake8-type-checking/)
-    #[prefix = "TCH"]
+    #[prefix = "TC"]
     Flake8TypeChecking,
     /// [flake8-gettext](https://pypi.org/project/flake8-gettext/)
     #[prefix = "INT"]
@@ -193,6 +193,9 @@ pub enum Linter {
     /// NumPy-specific rules
     #[prefix = "NPY"]
     Numpy,
+    /// [FastAPI](https://pypi.org/project/fastapi/)
+    #[prefix = "FAST"]
+    FastApi,
     /// [Airflow](https://pypi.org/project/apache-airflow/)
     #[prefix = "AIR"]
     Airflow,
@@ -202,9 +205,9 @@ pub enum Linter {
     /// [refurb](https://pypi.org/project/refurb/)
     #[prefix = "FURB"]
     Refurb,
-    /// [flake8-logging](https://pypi.org/project/flake8-logging/)
-    #[prefix = "LOG"]
-    Flake8Logging,
+    /// [pydoclint](https://pypi.org/project/pydoclint/)
+    #[prefix = "DOC"]
+    Pydoclint,
     /// Ruff-specific rules
     #[prefix = "RUF"]
     Ruff,
@@ -246,32 +249,31 @@ impl Rule {
     pub const fn lint_source(&self) -> LintSource {
         match self {
             Rule::InvalidPyprojectToml => LintSource::PyprojectToml,
-            Rule::UnusedNOQA => LintSource::Noqa,
+            Rule::BlanketNOQA | Rule::RedirectedNOQA | Rule::UnusedNOQA => LintSource::Noqa,
             Rule::BidirectionalUnicode
             | Rule::BlankLineWithWhitespace
             | Rule::DocLineTooLong
+            | Rule::IndentedFormFeed
             | Rule::LineTooLong
             | Rule::MissingCopyrightNotice
             | Rule::MissingNewlineAtEndOfFile
             | Rule::MixedSpacesAndTabs
             | Rule::TrailingWhitespace => LintSource::PhysicalLines,
             Rule::AmbiguousUnicodeCharacterComment
-            | Rule::AmbiguousUnicodeCharacterDocstring
-            | Rule::AmbiguousUnicodeCharacterString
-            | Rule::AvoidableEscapedQuote
-            | Rule::BadQuotesDocstring
-            | Rule::BadQuotesInlineString
-            | Rule::BadQuotesMultilineString
-            | Rule::BlanketNOQA
             | Rule::BlanketTypeIgnore
+            | Rule::BlankLineAfterDecorator
+            | Rule::BlankLineBetweenMethods
+            | Rule::BlankLinesAfterFunctionOrClass
+            | Rule::BlankLinesBeforeNestedDefinition
+            | Rule::BlankLinesTopLevel
             | Rule::CommentedOutCode
+            | Rule::EmptyComment
             | Rule::ExtraneousParentheses
             | Rule::InvalidCharacterBackspace
             | Rule::InvalidCharacterEsc
             | Rule::InvalidCharacterNul
             | Rule::InvalidCharacterSub
             | Rule::InvalidCharacterZeroWidthSpace
-            | Rule::InvalidEscapeSequence
             | Rule::InvalidTodoCapitalization
             | Rule::InvalidTodoTag
             | Rule::LineContainsFixme
@@ -295,14 +297,17 @@ impl Rule {
             | Rule::ShebangNotFirstLine
             | Rule::SingleLineImplicitStringConcatenation
             | Rule::TabIndentation
+            | Rule::TooManyBlankLines
+            | Rule::TooManyNewlinesAtEndOfFile
             | Rule::TrailingCommaOnBareTuple
             | Rule::TypeCommentInStub
-            | Rule::UnicodeKindPrefix
             | Rule::UselessSemicolon
             | Rule::UTF8EncodingDeclaration => LintSource::Tokens,
             Rule::IOError => LintSource::Io,
             Rule::UnsortedImports | Rule::MissingRequiredImport => LintSource::Imports,
-            Rule::ImplicitNamespacePackage | Rule::InvalidModuleName => LintSource::Filesystem,
+            Rule::ImplicitNamespacePackage
+            | Rule::InvalidModuleName
+            | Rule::StdlibModuleShadowing => LintSource::Filesystem,
             Rule::IndentationWithInvalidMultiple
             | Rule::IndentationWithInvalidMultipleComment
             | Rule::MissingWhitespace
@@ -323,6 +328,7 @@ impl Rule {
             | Rule::NoSpaceAfterBlockComment
             | Rule::NoSpaceAfterInlineComment
             | Rule::OverIndented
+            | Rule::RedundantBackslash
             | Rule::TabAfterComma
             | Rule::TabAfterKeyword
             | Rule::TabAfterOperator
@@ -352,9 +358,9 @@ impl Rule {
 pub const INCOMPATIBLE_CODES: &[(Rule, Rule, &str); 2] = &[
     (
         Rule::BlankLineBeforeClass,
-        Rule::OneBlankLineBeforeClass,
-        "`one-blank-line-before-class` (D203) and `no-blank-line-before-class` (D211) are \
-         incompatible. Ignoring `one-blank-line-before-class`.",
+        Rule::IncorrectBlankLineBeforeClass,
+        "`incorrect-blank-line-before-class` (D203) and `no-blank-line-before-class` (D211) are \
+         incompatible. Ignoring `incorrect-blank-line-before-class`.",
     ),
     (
         Rule::MultiLineSummaryFirstLine,

@@ -1,15 +1,16 @@
 //! Insert statements into Python code.
 use std::ops::Add;
 
-use ruff_python_ast::{PySourceType, Stmt};
-use ruff_python_parser::{lexer, AsMode, Tok};
-use ruff_text_size::{Ranged, TextSize};
-
 use ruff_diagnostics::Edit;
 use ruff_python_ast::helpers::is_docstring_stmt;
+use ruff_python_ast::Stmt;
 use ruff_python_codegen::Stylist;
+use ruff_python_parser::{TokenKind, Tokens};
 use ruff_python_trivia::{textwrap::indent, PythonWhitespace};
-use ruff_source_file::{Locator, UniversalNewlineIterator};
+use ruff_source_file::{LineRanges, UniversalNewlineIterator};
+use ruff_text_size::{Ranged, TextSize};
+
+use crate::Locator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Placement<'a> {
@@ -64,7 +65,7 @@ impl<'a> Insertion<'a> {
             // Otherwise, advance to the next row.
             locator.full_line_end(location)
         } else {
-            locator.contents_start()
+            locator.bom_start_offset()
         };
 
         // Skip over commented lines, with whitespace separation.
@@ -145,7 +146,7 @@ impl<'a> Insertion<'a> {
         mut location: TextSize,
         locator: &Locator<'a>,
         stylist: &Stylist,
-        source_type: PySourceType,
+        tokens: &Tokens,
     ) -> Insertion<'a> {
         enum Awaiting {
             Colon(u32),
@@ -154,40 +155,38 @@ impl<'a> Insertion<'a> {
         }
 
         let mut state = Awaiting::Colon(0);
-        for (tok, range) in
-            lexer::lex_starts_at(locator.after(location), source_type.as_mode(), location).flatten()
-        {
+        for token in tokens.after(location) {
             match state {
                 // Iterate until we find the colon indicating the start of the block body.
-                Awaiting::Colon(depth) => match tok {
-                    Tok::Colon if depth == 0 => {
+                Awaiting::Colon(depth) => match token.kind() {
+                    TokenKind::Colon if depth == 0 => {
                         state = Awaiting::Newline;
                     }
-                    Tok::Lpar | Tok::Lbrace | Tok::Lsqb => {
+                    TokenKind::Lpar | TokenKind::Lbrace | TokenKind::Lsqb => {
                         state = Awaiting::Colon(depth.saturating_add(1));
                     }
-                    Tok::Rpar | Tok::Rbrace | Tok::Rsqb => {
+                    TokenKind::Rpar | TokenKind::Rbrace | TokenKind::Rsqb => {
                         state = Awaiting::Colon(depth.saturating_sub(1));
                     }
                     _ => {}
                 },
                 // Once we've seen the colon, we're looking for a newline; otherwise, there's no
                 // block body (e.g. `if True: pass`).
-                Awaiting::Newline => match tok {
-                    Tok::Comment(..) => {}
-                    Tok::Newline => {
+                Awaiting::Newline => match token.kind() {
+                    TokenKind::Comment => {}
+                    TokenKind::Newline => {
                         state = Awaiting::Indent;
                     }
                     _ => {
-                        location = range.start();
+                        location = token.start();
                         break;
                     }
                 },
                 // Once we've seen the newline, we're looking for the indentation of the block body.
-                Awaiting::Indent => match tok {
-                    Tok::Comment(..) => {}
-                    Tok::NonLogicalNewline => {}
-                    Tok::Indent => {
+                Awaiting::Indent => match token.kind() {
+                    TokenKind::Comment => {}
+                    TokenKind::NonLogicalNewline => {}
+                    TokenKind::Indent => {
                         // This is like:
                         // ```python
                         // if True:
@@ -196,13 +195,13 @@ impl<'a> Insertion<'a> {
                         // Where `range` is the indentation before the `pass` token.
                         return Insertion::indented(
                             "",
-                            range.start(),
+                            token.start(),
                             stylist.line_ending().as_str(),
-                            locator.slice(range),
+                            locator.slice(token),
                         );
                     }
                     _ => {
-                        location = range.start();
+                        location = token.start();
                         break;
                     }
                 },
@@ -278,9 +277,7 @@ impl<'a> Insertion<'a> {
 /// Find the end of the last docstring.
 fn match_docstring_end(body: &[Stmt]) -> Option<TextSize> {
     let mut iter = body.iter();
-    let Some(mut stmt) = iter.next() else {
-        return None;
-    };
+    let mut stmt = iter.next()?;
     if !is_docstring_stmt(stmt) {
         return None;
     }
@@ -321,23 +318,22 @@ fn match_continuation(s: &str) -> Option<TextSize> {
 mod tests {
     use anyhow::Result;
 
-    use ruff_python_ast::PySourceType;
     use ruff_python_codegen::Stylist;
-    use ruff_python_parser::lexer::LexResult;
-    use ruff_python_parser::{parse_suite, Mode};
-    use ruff_source_file::{LineEnding, Locator};
+    use ruff_python_parser::parse_module;
+    use ruff_source_file::LineEnding;
     use ruff_text_size::TextSize;
+
+    use crate::Locator;
 
     use super::Insertion;
 
     #[test]
     fn start_of_file() -> Result<()> {
         fn insert(contents: &str) -> Result<Insertion> {
-            let program = parse_suite(contents, "<filename>")?;
-            let tokens: Vec<LexResult> = ruff_python_parser::tokenize(contents, Mode::Module);
+            let parsed = parse_module(contents)?;
             let locator = Locator::new(contents);
-            let stylist = Stylist::from_tokens(&tokens, &locator);
-            Ok(Insertion::start_of_file(&program, &locator, &stylist))
+            let stylist = Stylist::from_tokens(parsed.tokens(), locator.contents());
+            Ok(Insertion::start_of_file(parsed.suite(), &locator, &stylist))
         }
 
         let contents = "";
@@ -445,10 +441,10 @@ x = 1
     #[test]
     fn start_of_block() {
         fn insert(contents: &str, offset: TextSize) -> Insertion {
-            let tokens: Vec<LexResult> = ruff_python_parser::tokenize(contents, Mode::Module);
+            let parsed = parse_module(contents).unwrap();
             let locator = Locator::new(contents);
-            let stylist = Stylist::from_tokens(&tokens, &locator);
-            Insertion::start_of_block(offset, &locator, &stylist, PySourceType::default())
+            let stylist = Stylist::from_tokens(parsed.tokens(), locator.contents());
+            Insertion::start_of_block(offset, &locator, &stylist, parsed.tokens())
         }
 
         let contents = "if True: pass";

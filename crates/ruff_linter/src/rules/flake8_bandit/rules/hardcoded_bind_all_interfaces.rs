@@ -1,6 +1,9 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::ExprStringLiteral;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, StringLike};
+use ruff_text_size::Ranged;
+
+use crate::checkers::ast::Checker;
 
 /// ## What it does
 /// Checks for hardcoded bindings to all network interfaces (`0.0.0.0`).
@@ -23,21 +26,49 @@ use ruff_python_ast::ExprStringLiteral;
 ///
 /// ## References
 /// - [Common Weakness Enumeration: CWE-200](https://cwe.mitre.org/data/definitions/200.html)
-#[violation]
-pub struct HardcodedBindAllInterfaces;
+#[derive(ViolationMetadata)]
+pub(crate) struct HardcodedBindAllInterfaces;
 
 impl Violation for HardcodedBindAllInterfaces {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Possible binding to all interfaces")
+        "Possible binding to all interfaces".to_string()
     }
 }
 
 /// S104
-pub(crate) fn hardcoded_bind_all_interfaces(string: &ExprStringLiteral) -> Option<Diagnostic> {
-    if string.value == "0.0.0.0" {
-        Some(Diagnostic::new(HardcodedBindAllInterfaces, string.range))
-    } else {
-        None
-    }
+pub(crate) fn hardcoded_bind_all_interfaces(checker: &Checker, string: StringLike) {
+    match string {
+        StringLike::String(ast::ExprStringLiteral { value, .. }) => {
+            if value == "0.0.0.0" {
+                checker
+                    .report_diagnostic(Diagnostic::new(HardcodedBindAllInterfaces, string.range()));
+            }
+        }
+        StringLike::FString(ast::ExprFString { value, .. }) => {
+            for part in value {
+                match part {
+                    ast::FStringPart::Literal(literal) => {
+                        if &**literal == "0.0.0.0" {
+                            checker.report_diagnostic(Diagnostic::new(
+                                HardcodedBindAllInterfaces,
+                                literal.range(),
+                            ));
+                        }
+                    }
+                    ast::FStringPart::FString(f_string) => {
+                        for literal in f_string.elements.literals() {
+                            if &**literal == "0.0.0.0" {
+                                checker.report_diagnostic(Diagnostic::new(
+                                    HardcodedBindAllInterfaces,
+                                    literal.range(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        StringLike::Bytes(_) => (),
+    };
 }

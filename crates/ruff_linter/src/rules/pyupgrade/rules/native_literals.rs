@@ -2,8 +2,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::{self as ast, Expr};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr, Int, LiteralExpressionRef, UnaryOp};
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -33,12 +33,22 @@ impl FromStr for LiteralType {
 }
 
 impl LiteralType {
-    fn as_zero_value_expr(self) -> Expr {
+    fn as_zero_value_expr(self, checker: &Checker) -> Expr {
         match self {
-            LiteralType::Str => ast::ExprStringLiteral::default().into(),
-            LiteralType::Bytes => ast::ExprBytesLiteral::default().into(),
+            LiteralType::Str => ast::StringLiteral {
+                value: Box::default(),
+                range: TextRange::default(),
+                flags: checker.default_string_flags(),
+            }
+            .into(),
+            LiteralType::Bytes => ast::BytesLiteral {
+                value: Box::default(),
+                range: TextRange::default(),
+                flags: checker.default_bytes_flags(),
+            }
+            .into(),
             LiteralType::Int => ast::ExprNumberLiteral {
-                value: ast::Number::Int(0.into()),
+                value: ast::Number::Int(Int::from(0u8)),
                 range: TextRange::default(),
             }
             .into(),
@@ -52,20 +62,24 @@ impl LiteralType {
     }
 }
 
-impl TryFrom<&Expr> for LiteralType {
+impl TryFrom<LiteralExpressionRef<'_>> for LiteralType {
     type Error = ();
 
-    fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
-        match expr {
-            Expr::StringLiteral(_) => Ok(LiteralType::Str),
-            Expr::BytesLiteral(_) => Ok(LiteralType::Bytes),
-            Expr::NumberLiteral(ast::ExprNumberLiteral { value, .. }) => match value {
-                ast::Number::Int(_) => Ok(LiteralType::Int),
-                ast::Number::Float(_) => Ok(LiteralType::Float),
-                ast::Number::Complex { .. } => Err(()),
-            },
-            Expr::BooleanLiteral(_) => Ok(LiteralType::Bool),
-            _ => Err(()),
+    fn try_from(literal_expr: LiteralExpressionRef<'_>) -> Result<Self, Self::Error> {
+        match literal_expr {
+            LiteralExpressionRef::StringLiteral(_) => Ok(LiteralType::Str),
+            LiteralExpressionRef::BytesLiteral(_) => Ok(LiteralType::Bytes),
+            LiteralExpressionRef::NumberLiteral(ast::ExprNumberLiteral { value, .. }) => {
+                match value {
+                    ast::Number::Int(_) => Ok(LiteralType::Int),
+                    ast::Number::Float(_) => Ok(LiteralType::Float),
+                    ast::Number::Complex { .. } => Err(()),
+                }
+            }
+            LiteralExpressionRef::BooleanLiteral(_) => Ok(LiteralType::Bool),
+            LiteralExpressionRef::NoneLiteral(_) | LiteralExpressionRef::EllipsisLiteral(_) => {
+                Err(())
+            }
         }
     }
 }
@@ -105,8 +119,8 @@ impl fmt::Display for LiteralType {
 /// - [Python documentation: `int`](https://docs.python.org/3/library/functions.html#int)
 /// - [Python documentation: `float`](https://docs.python.org/3/library/functions.html#float)
 /// - [Python documentation: `bool`](https://docs.python.org/3/library/functions.html#bool)
-#[violation]
-pub struct NativeLiterals {
+#[derive(ViolationMetadata)]
+pub(crate) struct NativeLiterals {
     literal_type: LiteralType,
 }
 
@@ -131,7 +145,7 @@ impl AlwaysFixableViolation for NativeLiterals {
 
 /// UP018
 pub(crate) fn native_literals(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ast::ExprCall,
     parent_expr: Option<&ast::Expr>,
 ) {
@@ -146,26 +160,23 @@ pub(crate) fn native_literals(
         range: _,
     } = call;
 
-    let Expr::Name(ast::ExprName { ref id, .. }) = func.as_ref() else {
-        return;
-    };
-
     if !keywords.is_empty() || args.len() > 1 {
         return;
     }
 
-    let Ok(literal_type) = LiteralType::from_str(id.as_str()) else {
+    let semantic = checker.semantic();
+
+    let Some(builtin) = semantic.resolve_builtin_symbol(func) else {
         return;
     };
 
-    if !checker.semantic().is_builtin(id) {
+    let Ok(literal_type) = LiteralType::from_str(builtin) else {
         return;
-    }
+    };
 
     // There's no way to rewrite, e.g., `f"{f'{str()}'}"` within a nested f-string.
-    if checker.semantic().in_f_string() {
-        if checker
-            .semantic()
+    if semantic.in_f_string() {
+        if semantic
             .current_expressions()
             .filter(|expr| expr.is_f_string_expr())
             .count()
@@ -175,7 +186,7 @@ pub(crate) fn native_literals(
         }
     }
 
-    match args.get(0) {
+    match args.first() {
         None => {
             let mut diagnostic = Diagnostic::new(NativeLiterals { literal_type }, call.range());
 
@@ -185,21 +196,41 @@ pub(crate) fn native_literals(
                 return;
             }
 
-            let expr = literal_type.as_zero_value_expr();
+            let expr = literal_type.as_zero_value_expr(checker);
             let content = checker.generator().expr(&expr);
             diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
                 content,
                 call.range(),
             )));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
         Some(arg) => {
-            // Skip implicit string concatenations.
-            if arg.is_implicit_concatenated_string() {
+            let literal_expr = if let Some(literal_expr) = arg.as_literal_expr() {
+                // Skip implicit concatenated strings.
+                if literal_expr.is_implicit_concatenated() {
+                    return;
+                }
+                literal_expr
+            } else if let Expr::UnaryOp(ast::ExprUnaryOp {
+                op: UnaryOp::UAdd | UnaryOp::USub,
+                operand,
+                ..
+            }) = arg
+            {
+                if let Some(literal_expr) = operand
+                    .as_literal_expr()
+                    .filter(|expr| matches!(expr, LiteralExpressionRef::NumberLiteral(_)))
+                {
+                    literal_expr
+                } else {
+                    // Only allow unary operators for numbers.
+                    return;
+                }
+            } else {
                 return;
-            }
+            };
 
-            let Ok(arg_literal_type) = LiteralType::try_from(arg) else {
+            let Ok(arg_literal_type) = LiteralType::try_from(literal_expr) else {
                 return;
             };
 
@@ -213,14 +244,8 @@ pub(crate) fn native_literals(
             // Ex) `(7).denominator` is valid but `7.denominator` is not
             // Note that floats do not have this problem
             // Ex) `(1.0).real` is valid and `1.0.real` is too
-            let content = match (parent_expr, arg) {
-                (
-                    Some(Expr::Attribute(_)),
-                    Expr::NumberLiteral(ast::ExprNumberLiteral {
-                        value: ast::Number::Int(_),
-                        ..
-                    }),
-                ) => format!("({arg_code})"),
+            let content = match (parent_expr, literal_type) {
+                (Some(Expr::Attribute(_)), LiteralType::Int) => format!("({arg_code})"),
                 _ => arg_code.to_string(),
             };
 
@@ -229,7 +254,7 @@ pub(crate) fn native_literals(
                 content,
                 call.range(),
             )));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

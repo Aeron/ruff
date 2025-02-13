@@ -1,7 +1,7 @@
 use ruff_python_ast::Alias;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::resolve_imported_module_path;
 use ruff_text_size::Ranged;
 
@@ -9,19 +9,20 @@ use ruff_text_size::Ranged;
 /// Checks for import statements that import the current module.
 ///
 /// ## Why is this bad?
-/// Importing a module from itself is a circular dependency.
+/// Importing a module from itself is a circular dependency and results
+/// in an `ImportError` exception.
 ///
 /// ## Example
+///
 /// ```python
 /// # file: this_file.py
 /// from this_file import foo
 ///
 ///
-/// def foo():
-///     ...
+/// def foo(): ...
 /// ```
-#[violation]
-pub struct ImportSelf {
+#[derive(ViolationMetadata)]
+pub(crate) struct ImportSelf {
     name: String,
 }
 
@@ -35,9 +36,7 @@ impl Violation for ImportSelf {
 
 /// PLW0406
 pub(crate) fn import_self(alias: &Alias, module_path: Option<&[String]>) -> Option<Diagnostic> {
-    let Some(module_path) = module_path else {
-        return None;
-    };
+    let module_path = module_path?;
 
     if alias.name.split('.').eq(module_path) {
         return Some(Diagnostic::new(
@@ -53,18 +52,13 @@ pub(crate) fn import_self(alias: &Alias, module_path: Option<&[String]>) -> Opti
 
 /// PLW0406
 pub(crate) fn import_from_self(
-    level: Option<u32>,
+    level: u32,
     module: Option<&str>,
     names: &[Alias],
     module_path: Option<&[String]>,
 ) -> Option<Diagnostic> {
-    let Some(module_path) = module_path else {
-        return None;
-    };
-    let Some(imported_module_path) = resolve_imported_module_path(level, module, Some(module_path))
-    else {
-        return None;
-    };
+    let module_path = module_path?;
+    let imported_module_path = resolve_imported_module_path(level, module, Some(module_path))?;
 
     if imported_module_path
         .split('.')

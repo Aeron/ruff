@@ -1,10 +1,11 @@
 use std::fmt;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_semantic::{Binding, BindingKind};
-use ruff_source_file::Locator;
 use ruff_text_size::Ranged;
+
+use crate::Locator;
 
 /// ## What it does
 /// Checks for the use of non-ASCII characters in variable names.
@@ -24,8 +25,8 @@ use ruff_text_size::Ranged;
 /// ```
 ///
 /// [PEP 672]: https://peps.python.org/pep-0672/
-#[violation]
-pub struct NonAsciiName {
+#[derive(ViolationMetadata)]
+pub(crate) struct NonAsciiName {
     name: String,
     kind: Kind,
 }
@@ -34,13 +35,17 @@ impl Violation for NonAsciiName {
     #[derive_message_formats]
     fn message(&self) -> String {
         let Self { name, kind } = self;
-        format!("{kind} name `{name}` contains a non-ASCII character, consider renaming it")
+        format!("{kind} name `{name}` contains a non-ASCII character")
+    }
+
+    fn fix_title(&self) -> Option<String> {
+        Some("Rename the variable using ASCII characters".to_string())
     }
 }
 
 /// PLC2401
 pub(crate) fn non_ascii_name(binding: &Binding, locator: &Locator) -> Option<Diagnostic> {
-    let name = binding.name(locator);
+    let name = binding.name(locator.contents());
     if name.is_ascii() {
         return None;
     }
@@ -53,8 +58,8 @@ pub(crate) fn non_ascii_name(binding: &Binding, locator: &Locator) -> Option<Dia
         BindingKind::TypeParam => Kind::TypeParam,
         BindingKind::LoopVar => Kind::LoopVar,
         BindingKind::WithItemVar => Kind::WithItemVar,
-        BindingKind::Global => Kind::Global,
-        BindingKind::Nonlocal(_) => Kind::Nonlocal,
+        BindingKind::Global(_) => Kind::Global,
+        BindingKind::Nonlocal(_, _) => Kind::Nonlocal,
         BindingKind::ClassDefinition(_) => Kind::ClassDefinition,
         BindingKind::FunctionDefinition(_) => Kind::FunctionDefinition,
         BindingKind::BoundException => Kind::BoundException,
@@ -66,6 +71,7 @@ pub(crate) fn non_ascii_name(binding: &Binding, locator: &Locator) -> Option<Dia
         | BindingKind::FromImport(_)
         | BindingKind::SubmoduleImport(_)
         | BindingKind::Deletion
+        | BindingKind::ConditionalDeletion(_)
         | BindingKind::UnboundException(_) => {
             return None;
         }
@@ -80,7 +86,7 @@ pub(crate) fn non_ascii_name(binding: &Binding, locator: &Locator) -> Option<Dia
     ))
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum Kind {
     Annotation,
     Argument,

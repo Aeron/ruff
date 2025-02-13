@@ -1,18 +1,17 @@
-use ruff_diagnostics::Violation;
-use ruff_diagnostics::{Diagnostic, DiagnosticKind};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::{self as ast, Expr, ExprContext};
+use ruff_diagnostics::{Diagnostic, Violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr};
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
-use crate::registry::Rule;
 use crate::rules::pandas_vet::helpers::{test_expression, Resolution};
 
 /// ## What it does
 /// Checks for uses of `.values` on Pandas Series and Index objects.
 ///
 /// ## Why is this bad?
-/// The `.values` attribute is ambiguous as it's return type is unclear. As
+/// The `.values` attribute is ambiguous as its return type is unclear. As
 /// such, it is no longer recommended by the Pandas documentation.
 ///
 /// Instead, use `.to_numpy()` to return a NumPy array, or `.array` to return a
@@ -34,29 +33,31 @@ use crate::rules::pandas_vet::helpers::{test_expression, Resolution};
 ///
 /// ## References
 /// - [Pandas documentation: Accessing the values in a Series or Index](https://pandas.pydata.org/pandas-docs/stable/whatsnew/v0.24.0.html#accessing-the-values-in-a-series-or-index)
-#[violation]
-pub struct PandasUseOfDotValues;
+#[derive(ViolationMetadata)]
+pub(crate) struct PandasUseOfDotValues;
 
 impl Violation for PandasUseOfDotValues {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `.to_numpy()` instead of `.values`")
+        "Use `.to_numpy()` instead of `.values`".to_string()
     }
 }
 
-pub(crate) fn attr(checker: &mut Checker, attribute: &ast::ExprAttribute) {
-    // Avoid, e.g., `x.values = y`.
-    if matches!(attribute.ctx, ExprContext::Store | ExprContext::Del) {
+/// PD011
+pub(crate) fn attr(checker: &Checker, attribute: &ast::ExprAttribute) {
+    if !checker.semantic().seen_module(Modules::PANDAS) {
         return;
     }
 
-    let violation: DiagnosticKind = match attribute.attr.as_str() {
-        // PD011
-        "values" if checker.settings.rules.enabled(Rule::PandasUseOfDotValues) => {
-            PandasUseOfDotValues.into()
-        }
-        _ => return,
-    };
+    // Avoid, e.g., `x.values = y`.
+    if !attribute.ctx.is_load() {
+        return;
+    }
+
+    // Check for, e.g., `df.values`.
+    if attribute.attr.as_str() != "values" {
+        return;
+    }
 
     // Avoid flagging on function calls (e.g., `df.values()`).
     if checker
@@ -76,7 +77,5 @@ pub(crate) fn attr(checker: &mut Checker, attribute: &ast::ExprAttribute) {
         return;
     }
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(violation, attribute.range()));
+    checker.report_diagnostic(Diagnostic::new(PandasUseOfDotValues, attribute.range()));
 }

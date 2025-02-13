@@ -1,12 +1,12 @@
 use ruff_python_ast::{self as ast, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_semantic::analyze::typing::{is_immutable_annotation, is_mutable_expr};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
-use crate::rules::ruff::rules::helpers::{is_class_var_annotation, is_dataclass};
+use crate::rules::ruff::rules::helpers::{dataclass_kind, is_class_var_annotation};
 
 /// ## What it does
 /// Checks for mutable default values in dataclass attributes.
@@ -19,8 +19,8 @@ use crate::rules::ruff::rules::helpers::{is_class_var_annotation, is_dataclass};
 /// Instead of sharing mutable defaults, use the `field(default_factory=...)`
 /// pattern.
 ///
-/// If the default value is intended to be mutable, it should be annotated with
-/// `typing.ClassVar`.
+/// If the default value is intended to be mutable, it must be annotated with
+/// `typing.ClassVar`; otherwise, a `ValueError` will be raised.
 ///
 /// ## Examples
 /// ```python
@@ -29,6 +29,8 @@ use crate::rules::ruff::rules::helpers::{is_class_var_annotation, is_dataclass};
 ///
 /// @dataclass
 /// class A:
+///     # A list without a `default_factory` or `ClassVar` annotation
+///     # will raise a `ValueError`.
 ///     mutable_default: list[int] = []
 /// ```
 ///
@@ -44,7 +46,7 @@ use crate::rules::ruff::rules::helpers::{is_class_var_annotation, is_dataclass};
 ///
 /// Or:
 /// ```python
-/// from dataclasses import dataclass, field
+/// from dataclasses import dataclass
 /// from typing import ClassVar
 ///
 ///
@@ -52,37 +54,41 @@ use crate::rules::ruff::rules::helpers::{is_class_var_annotation, is_dataclass};
 /// class A:
 ///     mutable_default: ClassVar[list[int]] = []
 /// ```
-#[violation]
-pub struct MutableDataclassDefault;
+#[derive(ViolationMetadata)]
+pub(crate) struct MutableDataclassDefault;
 
 impl Violation for MutableDataclassDefault {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Do not use mutable default values for dataclass attributes")
+        "Do not use mutable default values for dataclass attributes".to_string()
     }
 }
 
 /// RUF008
-pub(crate) fn mutable_dataclass_default(checker: &mut Checker, class_def: &ast::StmtClassDef) {
-    if !is_dataclass(class_def, checker.semantic()) {
+pub(crate) fn mutable_dataclass_default(checker: &Checker, class_def: &ast::StmtClassDef) {
+    let semantic = checker.semantic();
+
+    if dataclass_kind(class_def, semantic).is_none() {
         return;
-    }
+    };
 
     for statement in &class_def.body {
-        if let Stmt::AnnAssign(ast::StmtAnnAssign {
+        let Stmt::AnnAssign(ast::StmtAnnAssign {
             annotation,
             value: Some(value),
             ..
         }) = statement
+        else {
+            continue;
+        };
+
+        if is_mutable_expr(value, checker.semantic())
+            && !is_class_var_annotation(annotation, checker.semantic())
+            && !is_immutable_annotation(annotation, checker.semantic(), &[])
         {
-            if is_mutable_expr(value, checker.semantic())
-                && !is_class_var_annotation(annotation, checker.semantic())
-                && !is_immutable_annotation(annotation, checker.semantic(), &[])
-            {
-                checker
-                    .diagnostics
-                    .push(Diagnostic::new(MutableDataclassDefault, value.range()));
-            }
+            let diagnostic = Diagnostic::new(MutableDataclassDefault, value.range());
+
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

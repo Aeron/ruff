@@ -7,18 +7,17 @@ use ruff_python_ast::{
 use ruff_python_trivia::{SimpleToken, SimpleTokenKind, SimpleTokenizer};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
-use crate::comments::{
-    leading_alternate_branch_comments, trailing_comments, SourceComment, SuppressionKind,
-};
-use crate::prelude::*;
+use crate::comments::{leading_alternate_branch_comments, trailing_comments, SourceComment};
 use crate::statement::suite::{contains_only_an_ellipsis, SuiteKind};
 use crate::verbatim::write_suppressed_clause_header;
+use crate::{has_skip_comment, prelude::*};
 
 /// The header of a compound statement clause.
 ///
 /// > A compound statement consists of one or more ‘clauses.’ A clause consists of a header and a ‘suite.’
 /// > The clause headers of a particular compound statement are all at the same indentation level.
 /// > Each clause header begins with a uniquely identifying keyword and ends with a colon.
+///
 /// [source](https://docs.python.org/3/reference/compound_stmts.html#compound-statements)
 #[derive(Copy, Clone)]
 pub(crate) enum ClauseHeader<'a> {
@@ -37,7 +36,7 @@ pub(crate) enum ClauseHeader<'a> {
     OrElse(ElseClause<'a>),
 }
 
-impl<'a> ClauseHeader<'a> {
+impl ClauseHeader<'_> {
     /// The range from the clause keyword up to and including the final colon.
     pub(crate) fn range(self, source: &str) -> FormatResult<TextRange> {
         let keyword_range = self.first_keyword_range(source)?;
@@ -110,7 +109,7 @@ impl<'a> ClauseHeader<'a> {
                 returns,
                 body: _,
             }) => {
-                if let Some(type_params) = type_params.as_ref() {
+                if let Some(type_params) = type_params.as_deref() {
                     visit(type_params, visitor);
                 }
                 visit(parameters.as_ref(), visitor);
@@ -353,11 +352,23 @@ impl<'ast> Format<PyFormatContext<'ast>> for FormatClauseHeader<'_, 'ast> {
             leading_alternate_branch_comments(leading_comments, last_node).fmt(f)?;
         }
 
-        if SuppressionKind::has_skip_comment(self.trailing_colon_comment, f.context().source()) {
+        if has_skip_comment(self.trailing_colon_comment, f.context().source()) {
             write_suppressed_clause_header(self.header, f)?;
         } else {
-            f.write_fmt(Arguments::from(&self.formatter))?;
-            token(":").fmt(f)?;
+            // Write a source map entry for the colon for range formatting to support formatting the clause header without
+            // the clause body. Avoid computing `self.header.range()` otherwise because it's somewhat involved.
+            let clause_end = if f.options().source_map_generation().is_enabled() {
+                Some(source_position(
+                    self.header.range(f.context().source())?.end(),
+                ))
+            } else {
+                None
+            };
+
+            write!(
+                f,
+                [Arguments::from(&self.formatter), token(":"), clause_end]
+            )?;
         }
 
         trailing_comments(self.trailing_colon_comment).fmt(f)
@@ -370,30 +381,26 @@ pub(crate) struct FormatClauseBody<'a> {
     trailing_comments: &'a [SourceComment],
 }
 
-impl<'a> FormatClauseBody<'a> {
-    #[must_use]
-    pub(crate) fn with_kind(mut self, kind: SuiteKind) -> Self {
-        self.kind = kind;
-        self
-    }
-}
-
 pub(crate) fn clause_body<'a>(
     body: &'a Suite,
+    kind: SuiteKind,
     trailing_comments: &'a [SourceComment],
 ) -> FormatClauseBody<'a> {
     FormatClauseBody {
         body,
-        kind: SuiteKind::default(),
+        kind,
         trailing_comments,
     }
 }
 
 impl Format<PyFormatContext<'_>> for FormatClauseBody<'_> {
     fn fmt(&self, f: &mut Formatter<PyFormatContext<'_>>) -> FormatResult<()> {
-        // In stable, stubs are only collapsed in stub files, in preview this is consistently
-        // applied everywhere
-        if (f.options().source_type().is_stub() || f.options().preview().is_enabled())
+        // In stable, stubs are only collapsed in stub files, in preview stubs in functions
+        // or classes are collapsed too
+        let should_collapse_stub = f.options().source_type().is_stub()
+            || matches!(self.kind, SuiteKind::Function | SuiteKind::Class);
+
+        if should_collapse_stub
             && contains_only_an_ellipsis(self.body, f.context().comments())
             && self.trailing_comments.is_empty()
         {
@@ -453,7 +460,12 @@ fn find_keyword(
 fn colon_range(after_keyword_or_condition: TextSize, source: &str) -> FormatResult<TextRange> {
     let mut tokenizer = SimpleTokenizer::starts_at(after_keyword_or_condition, source)
         .skip_trivia()
-        .skip_while(|token| token.kind() == SimpleTokenKind::RParen);
+        .skip_while(|token| {
+            matches!(
+                token.kind(),
+                SimpleTokenKind::RParen | SimpleTokenKind::Comma
+            )
+        });
 
     match tokenizer.next() {
         Some(SimpleToken {

@@ -1,12 +1,14 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+use crate::package::PackageRoot;
+use crate::rules::pep8_naming::settings::IgnoreNames;
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::PySourceType;
 use ruff_python_stdlib::identifiers::{is_migration_name, is_module_name};
+use ruff_python_stdlib::path::is_module_file;
 use ruff_text_size::TextRange;
-
-use crate::settings::types::IdentifierPattern;
 
 /// ## What it does
 /// Checks for module names that do not follow the `snake_case` naming
@@ -21,7 +23,7 @@ use crate::settings::types::IdentifierPattern;
 /// > all-lowercase names, although the use of underscores is discouraged.
 /// >
 /// > When an extension module written in C or C++ has an accompanying Python module that
-/// > provides a higher level (e.g. more object oriented) interface, the C/C++ module has
+/// > provides a higher level (e.g. more object-oriented) interface, the C/C++ module has
 /// > a leading underscore (e.g. `_socket`).
 ///
 /// Further, in order for Python modules to be importable, they must be valid
@@ -33,8 +35,8 @@ use crate::settings::types::IdentifierPattern;
 /// - Instead of `ExampleModule`, use `example_module`.
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#package-and-module-names
-#[violation]
-pub struct InvalidModuleName {
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidModuleName {
     name: String,
 }
 
@@ -49,29 +51,19 @@ impl Violation for InvalidModuleName {
 /// N999
 pub(crate) fn invalid_module_name(
     path: &Path,
-    package: Option<&Path>,
-    ignore_names: &[IdentifierPattern],
+    package: Option<PackageRoot<'_>>,
+    ignore_names: &IgnoreNames,
 ) -> Option<Diagnostic> {
-    if !path
-        .extension()
-        .is_some_and(|ext| ext == "py" || ext == "pyi")
-    {
+    if !PySourceType::try_from_path(path).is_some_and(PySourceType::is_py_file_or_stub) {
         return None;
     }
 
     if let Some(package) = package {
         let module_name = if is_module_file(path) {
-            package.file_name().unwrap().to_string_lossy()
+            package.path().file_name().unwrap().to_string_lossy()
         } else {
             path.file_stem().unwrap().to_string_lossy()
         };
-
-        if ignore_names
-            .iter()
-            .any(|ignore_name| ignore_name.matches(&module_name))
-        {
-            return None;
-        }
 
         // As a special case, we allow files in `versions` and `migrations` directories to start
         // with a digit (e.g., `0001_initial.py`), to support common conventions used by Django
@@ -81,7 +73,12 @@ pub(crate) fn invalid_module_name(
         } else {
             is_module_name(&module_name)
         };
+
         if !is_valid_module_name {
+            // Ignore any explicitly-allowed names.
+            if ignore_names.matches(&module_name) {
+                return None;
+            }
             return Some(Diagnostic::new(
                 InvalidModuleName {
                     name: module_name.to_string(),
@@ -92,16 +89,6 @@ pub(crate) fn invalid_module_name(
     }
 
     None
-}
-
-/// Return `true` if a [`Path`] should use the name of its parent directory as its module name.
-fn is_module_file(path: &Path) -> bool {
-    path.file_name().is_some_and(|file_name| {
-        file_name == "__init__.py"
-            || file_name == "__init__.pyi"
-            || file_name == "__main__.py"
-            || file_name == "__main__.pyi"
-    })
 }
 
 /// Return `true` if a [`Path`] refers to a migration file.

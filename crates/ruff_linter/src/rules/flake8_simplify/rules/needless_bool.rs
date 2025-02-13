@@ -1,10 +1,13 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::Name;
+use ruff_python_ast::traversal;
 use ruff_python_ast::{self as ast, Arguments, ElifElseClause, Expr, ExprContext, Stmt};
 use ruff_python_semantic::analyze::typing::{is_sys_version_block, is_type_checking_block};
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
+use crate::fix::snippet::SourceCodeSnippet;
 
 /// ## What it does
 /// Checks for `if` statements that can be replaced with `bool`.
@@ -14,8 +17,9 @@ use crate::checkers::ast::Checker;
 /// a falsey condition can be replaced with boolean casts.
 ///
 /// ## Example
+/// Given:
 /// ```python
-/// if foo:
+/// if x > 0:
 ///     return True
 /// else:
 ///     return False
@@ -23,14 +27,31 @@ use crate::checkers::ast::Checker;
 ///
 /// Use instead:
 /// ```python
-/// return bool(foo)
+/// return x > 0
 /// ```
+///
+/// Or, given:
+/// ```python
+/// if x > 0:
+///     return True
+/// return False
+/// ```
+///
+/// Use instead:
+/// ```python
+/// return x > 0
+/// ```
+///
+/// ## Preview
+/// In preview, double negations such as `not a != b`, `not a not in b`, `not a is not b`
+/// will be simplified to `a == b`, `a in b` and `a is b`, respectively.
 ///
 /// ## References
 /// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
-#[violation]
-pub struct NeedlessBool {
-    condition: String,
+#[derive(ViolationMetadata)]
+pub(crate) struct NeedlessBool {
+    condition: Option<SourceCodeSnippet>,
+    negate: bool,
 }
 
 impl Violation for NeedlessBool {
@@ -38,34 +59,64 @@ impl Violation for NeedlessBool {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let NeedlessBool { condition } = self;
-        format!("Return the condition `{condition}` directly")
+        let NeedlessBool { condition, negate } = self;
+        if let Some(condition) = condition.as_ref().and_then(SourceCodeSnippet::full_display) {
+            format!("Return the condition `{condition}` directly")
+        } else if *negate {
+            "Return the negated condition directly".to_string()
+        } else {
+            "Return the condition directly".to_string()
+        }
     }
 
     fn fix_title(&self) -> Option<String> {
-        let NeedlessBool { condition } = self;
-        Some(format!("Replace with `return {condition}`"))
+        let NeedlessBool { condition, .. } = self;
+        Some(
+            if let Some(condition) = condition.as_ref().and_then(SourceCodeSnippet::full_display) {
+                format!("Replace with `return {condition}`")
+            } else {
+                "Inline condition".to_string()
+            },
+        )
     }
 }
 
 /// SIM103
-pub(crate) fn needless_bool(checker: &mut Checker, stmt_if: &ast::StmtIf) {
+pub(crate) fn needless_bool(checker: &Checker, stmt: &Stmt) {
+    let Stmt::If(stmt_if) = stmt else { return };
     let ast::StmtIf {
         test: if_test,
         body: if_body,
         elif_else_clauses,
-        range: _,
+        ..
     } = stmt_if;
 
     // Extract an `if` or `elif` (that returns) followed by an else (that returns the same value)
     let (if_test, if_body, else_body, range) = match elif_else_clauses.as_slice() {
-        // if-else case
+        // if-else case:
+        // ```python
+        // if x > 0:
+        //     return True
+        // else:
+        //     return False
+        // ```
         [ElifElseClause {
             body: else_body,
             test: None,
             ..
-        }] => (if_test.as_ref(), if_body, else_body, stmt_if.range()),
+        }] => (
+            if_test.as_ref(),
+            if_body,
+            else_body.as_slice(),
+            stmt_if.range(),
+        ),
         // elif-else case
+        // ```python
+        // if x > 0:
+        //     return True
+        // elif x < 0:
+        //     return False
+        // ```
         [.., ElifElseClause {
             body: elif_body,
             test: Some(elif_test),
@@ -77,12 +128,47 @@ pub(crate) fn needless_bool(checker: &mut Checker, stmt_if: &ast::StmtIf) {
         }] => (
             elif_test,
             elif_body,
-            else_body,
+            else_body.as_slice(),
             TextRange::new(elif_range.start(), else_range.end()),
         ),
+        // if-implicit-else case:
+        // ```python
+        // if x > 0:
+        //     return True
+        // return False
+        // ```
+        [] => {
+            // Fetching the next sibling is expensive, so do some validation early.
+            if is_one_line_return_bool(if_body).is_none() {
+                return;
+            }
+
+            // Fetch the next sibling statement.
+            let Some(next_stmt) = checker
+                .semantic()
+                .current_statement_parent()
+                .and_then(|parent| traversal::suite(stmt, parent))
+                .and_then(|suite| suite.next_sibling())
+            else {
+                return;
+            };
+
+            // If the next sibling is not a return statement, abort.
+            if !next_stmt.is_return_stmt() {
+                return;
+            }
+
+            (
+                if_test.as_ref(),
+                if_body,
+                std::slice::from_ref(next_stmt),
+                TextRange::new(stmt_if.start(), next_stmt.end()),
+            )
+        }
         _ => return,
     };
 
+    // Both branches must be one-liners that return a boolean.
     let (Some(if_return), Some(else_return)) = (
         is_one_line_return_bool(if_body),
         is_one_line_return_bool(else_body),
@@ -90,11 +176,20 @@ pub(crate) fn needless_bool(checker: &mut Checker, stmt_if: &ast::StmtIf) {
         return;
     };
 
-    // If the branches have the same condition, abort (although the code could be
-    // simplified).
-    if if_return == else_return {
-        return;
-    }
+    // Determine whether the return values are inverted, as in:
+    // ```python
+    // if x > 0:
+    //     return False
+    // else:
+    //     return True
+    // ```
+    let inverted = match (if_return, else_return) {
+        (Bool::True, Bool::False) => false,
+        (Bool::False, Bool::True) => true,
+        // If the branches have the same condition, abort (although the code could be
+        // simplified).
+        _ => return,
+    };
 
     // Avoid suggesting ternary for `if sys.version_info >= ...`-style checks.
     if is_sys_version_block(stmt_if, checker.semantic()) {
@@ -106,51 +201,112 @@ pub(crate) fn needless_bool(checker: &mut Checker, stmt_if: &ast::StmtIf) {
         return;
     }
 
-    let condition = checker.generator().expr(if_test);
-    let mut diagnostic = Diagnostic::new(NeedlessBool { condition }, range);
-    if matches!(if_return, Bool::True)
-        && matches!(else_return, Bool::False)
-        && !checker.indexer().has_comments(&range, checker.locator())
-        && (if_test.is_compare_expr() || checker.semantic().is_builtin("bool"))
+    // Generate the replacement condition.
+    let condition = if checker
+        .comment_ranges()
+        .has_comments(&range, checker.source())
     {
-        if if_test.is_compare_expr() {
-            // If the condition is a comparison, we can replace it with the condition.
-            let node = ast::StmtReturn {
-                value: Some(Box::new(if_test.clone())),
-                range: TextRange::default(),
-            };
-            diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
-                checker.generator().stmt(&node.into()),
-                range,
-            )));
-        } else {
-            // Otherwise, we need to wrap the condition in a call to `bool`. (We've already
-            // verified, above, that `bool` is a builtin.)
-            let node = ast::ExprName {
-                id: "bool".into(),
+        None
+    } else {
+        // If the return values are inverted, wrap the condition in a `not`.
+        if inverted {
+            match if_test {
+                Expr::UnaryOp(ast::ExprUnaryOp {
+                    op: ast::UnaryOp::Not,
+                    operand,
+                    ..
+                }) => Some((**operand).clone()),
+
+                Expr::Compare(ast::ExprCompare {
+                    ops,
+                    left,
+                    comparators,
+                    ..
+                }) if checker.settings.preview.is_enabled()
+                    && matches!(
+                        ops.as_ref(),
+                        [ast::CmpOp::Eq
+                            | ast::CmpOp::NotEq
+                            | ast::CmpOp::In
+                            | ast::CmpOp::NotIn
+                            | ast::CmpOp::Is
+                            | ast::CmpOp::IsNot]
+                    ) =>
+                {
+                    let ([op], [right]) = (ops.as_ref(), comparators.as_ref()) else {
+                        unreachable!("Single comparison with multiple comparators");
+                    };
+
+                    Some(Expr::Compare(ast::ExprCompare {
+                        ops: Box::new([op.negate()]),
+                        left: left.clone(),
+                        comparators: Box::new([right.clone()]),
+                        range: TextRange::default(),
+                    }))
+                }
+
+                _ => Some(Expr::UnaryOp(ast::ExprUnaryOp {
+                    op: ast::UnaryOp::Not,
+                    operand: Box::new(if_test.clone()),
+                    range: TextRange::default(),
+                })),
+            }
+        } else if if_test.is_compare_expr() {
+            // If the condition is a comparison, we can replace it with the condition, since we
+            // know it's a boolean.
+            Some(if_test.clone())
+        } else if checker.semantic().has_builtin_binding("bool") {
+            // Otherwise, we need to wrap the condition in a call to `bool`.
+            let func_node = ast::ExprName {
+                id: Name::new_static("bool"),
                 ctx: ExprContext::Load,
                 range: TextRange::default(),
             };
-            let node1 = ast::ExprCall {
-                func: Box::new(node.into()),
+            let call_node = ast::ExprCall {
+                func: Box::new(func_node.into()),
                 arguments: Arguments {
-                    args: vec![if_test.clone()],
-                    keywords: vec![],
+                    args: Box::from([if_test.clone()]),
+                    keywords: Box::from([]),
                     range: TextRange::default(),
                 },
                 range: TextRange::default(),
             };
-            let node2 = ast::StmtReturn {
-                value: Some(Box::new(node1.into())),
-                range: TextRange::default(),
-            };
-            diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
-                checker.generator().stmt(&node2.into()),
-                range,
-            )));
-        };
+            Some(Expr::Call(call_node))
+        } else {
+            None
+        }
+    };
+
+    // Generate the replacement `return` statement.
+    let replacement = condition.as_ref().map(|expr| {
+        Stmt::Return(ast::StmtReturn {
+            value: Some(Box::new(expr.clone())),
+            range: TextRange::default(),
+        })
+    });
+
+    // Generate source code.
+    let replacement = replacement
+        .as_ref()
+        .map(|stmt| checker.generator().stmt(stmt));
+    let condition = condition
+        .as_ref()
+        .map(|expr| checker.generator().expr(expr));
+
+    let mut diagnostic = Diagnostic::new(
+        NeedlessBool {
+            condition: condition.map(SourceCodeSnippet::new),
+            negate: inverted,
+        },
+        range,
+    );
+    if let Some(replacement) = replacement {
+        diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
+            replacement,
+            range,
+        )));
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

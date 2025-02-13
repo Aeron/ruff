@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_linter/src/noqa.rs
 expression: "Directive::try_extract(source, TextSize::default())"
+snapshot_kind: text
 ---
 Ok(
     Some(
@@ -8,7 +9,10 @@ Ok(
             Codes {
                 range: 0..12,
                 codes: [
-                    "F401",
+                    Code {
+                        code: "F401",
+                        range: 8..12,
+                    },
                 ],
             },
         ),

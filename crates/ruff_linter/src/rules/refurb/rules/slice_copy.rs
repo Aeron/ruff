@@ -1,5 +1,6 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::Name;
 use ruff_python_ast::{self as ast, Expr};
 use ruff_python_semantic::analyze::typing::is_list;
 use ruff_python_semantic::{Binding, SemanticModel};
@@ -35,15 +36,15 @@ use crate::rules::refurb::helpers::generate_method_call;
 ///
 /// ## References
 /// - [Python documentation: Mutable Sequence Types](https://docs.python.org/3/library/stdtypes.html#mutable-sequence-types)
-#[violation]
-pub struct SliceCopy;
+#[derive(ViolationMetadata)]
+pub(crate) struct SliceCopy;
 
 impl Violation for SliceCopy {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Prefer `copy` method over slicing")
+        "Prefer `copy` method over slicing".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
@@ -52,7 +53,7 @@ impl Violation for SliceCopy {
 }
 
 /// FURB145
-pub(crate) fn slice_copy(checker: &mut Checker, subscript: &ast::ExprSubscript) {
+pub(crate) fn slice_copy(checker: &Checker, subscript: &ast::ExprSubscript) {
     if subscript.ctx.is_store() || subscript.ctx.is_del() {
         return;
     }
@@ -61,20 +62,20 @@ pub(crate) fn slice_copy(checker: &mut Checker, subscript: &ast::ExprSubscript) 
         return;
     };
     let mut diagnostic = Diagnostic::new(SliceCopy, subscript.range());
-    let replacement = generate_method_call(name, "copy", checker.generator());
+    let replacement = generate_method_call(name.clone(), "copy", checker.generator());
     diagnostic.set_fix(Fix::safe_edit(Edit::replacement(
         replacement,
         subscript.start(),
         subscript.end(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Matches `obj[:]` where `obj` is a list.
 fn match_list_full_slice<'a>(
     subscript: &'a ast::ExprSubscript,
     semantic: &SemanticModel,
-) -> Option<&'a str> {
+) -> Option<&'a Name> {
     // Check that it is `obj[:]`.
     if !matches!(
         subscript.slice.as_ref(),

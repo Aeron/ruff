@@ -8,7 +8,7 @@ import typing
 from abc import ABCMeta, abstractmethod
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 from enum import EnumMeta
-from typing import Any, overload
+from typing import Any, Generic, ParamSpec, Type, TypeVar, TypeVarTuple, overload
 
 import typing_extensions
 from _typeshed import Self
@@ -195,6 +195,13 @@ class BadAsyncIterator(collections.abc.AsyncIterator[str]):
     def __aiter__(self) -> typing.AsyncIterator[str]:
         ...  # Y034 "__aiter__" methods in classes like "BadAsyncIterator" usually return "self" at runtime. Consider using "typing_extensions.Self" in "BadAsyncIterator.__aiter__", e.g. "def __aiter__(self) -> Self: ..."  # Y022 Use "collections.abc.AsyncIterator[T]" instead of "typing.AsyncIterator[T]" (PEP 585 syntax)
 
+class SubclassOfBadIterator3(BadIterator3):
+    def __iter__(self) -> Iterator[int]:  # Y034
+        ...
+
+class SubclassOfBadAsyncIterator(BadAsyncIterator):
+    def __aiter__(self) -> collections.abc.AsyncIterator[str]:  # Y034
+        ...
 
 class AsyncIteratorReturningAsyncIterable:
     def __aiter__(self) -> AsyncIterable[str]:
@@ -225,6 +232,11 @@ class MetaclassInWhichSelfCannotBeUsed4(ABCMeta):
     async def __aenter__(self) -> MetaclassInWhichSelfCannotBeUsed4: ...
     def __isub__(self, other: MetaclassInWhichSelfCannotBeUsed4) -> MetaclassInWhichSelfCannotBeUsed4: ...
 
+class SubclassOfMetaclassInWhichSelfCannotBeUsed(MetaclassInWhichSelfCannotBeUsed4):
+    def __new__(cls) -> SubclassOfMetaclassInWhichSelfCannotBeUsed: ...
+    def __enter__(self) -> SubclassOfMetaclassInWhichSelfCannotBeUsed: ...
+    async def __aenter__(self) -> SubclassOfMetaclassInWhichSelfCannotBeUsed: ...
+    def __isub__(self, other: SubclassOfMetaclassInWhichSelfCannotBeUsed) -> SubclassOfMetaclassInWhichSelfCannotBeUsed: ...
 
 class Abstract(Iterator[str]):
     @abstractmethod
@@ -305,3 +317,45 @@ def __ne__(self, other: Any) -> bool:
 
 def __imul__(self, other: Any) -> list[str]:
     ...
+
+class UsesStringizedAnnotations:
+    def __iadd__(self, other: "UsesStringizedAnnotations") -> "typing.Self":
+        return self
+
+
+class NonGeneric1(tuple):
+    def __new__(cls: type[NonGeneric1], *args, **kwargs) -> NonGeneric1: ...
+    def __enter__(self: NonGeneric1) -> NonGeneric1: ...
+
+class NonGeneric2(tuple):
+    def __new__(cls: Type[NonGeneric2]) -> NonGeneric2: ...
+
+class Generic1[T](list):
+    def __new__(cls: type[Generic1]) -> Generic1: ...
+    def __enter__(self: Generic1) -> Generic1: ...
+
+
+### Correctness of typevar-likes are not verified.
+
+T = TypeVar('T')
+P = ParamSpec()
+Ts = TypeVarTuple('foo')
+
+class Generic2(Generic[T]):
+    def __new__(cls: type[Generic2]) -> Generic2: ...
+    def __enter__(self: Generic2) -> Generic2: ...
+
+class Generic3(tuple[*Ts]):
+    def __new__(cls: type[Generic3]) -> Generic3: ...
+    def __enter__(self: Generic3) -> Generic3: ...
+
+class Generic4(collections.abc.Callable[P, ...]):
+    def __new__(cls: type[Generic4]) -> Generic4: ...
+    def __enter__(self: Generic4) -> Generic4: ...
+
+from some_module import PotentialTypeVar
+
+class Generic5(list[PotentialTypeVar]):
+    def __new__(cls: type[Generic5]) -> Generic5: ...
+    def __enter__(self: Generic5) -> Generic5: ...
+

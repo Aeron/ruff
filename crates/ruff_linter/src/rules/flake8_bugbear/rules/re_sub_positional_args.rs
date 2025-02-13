@@ -3,7 +3,8 @@ use std::fmt;
 use ruff_python_ast::{self as ast};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -38,8 +39,8 @@ use crate::checkers::ast::Checker;
 /// - [Python documentation: `re.sub`](https://docs.python.org/3/library/re.html#re.sub)
 /// - [Python documentation: `re.subn`](https://docs.python.org/3/library/re.html#re.subn)
 /// - [Python documentation: `re.split`](https://docs.python.org/3/library/re.html#re.split)
-#[violation]
-pub struct ReSubPositionalArgs {
+#[derive(ViolationMetadata)]
+pub(crate) struct ReSubPositionalArgs {
     method: Method,
 }
 
@@ -55,11 +56,15 @@ impl Violation for ReSubPositionalArgs {
 }
 
 /// B034
-pub(crate) fn re_sub_positional_args(checker: &mut Checker, call: &ast::ExprCall) {
+pub(crate) fn re_sub_positional_args(checker: &Checker, call: &ast::ExprCall) {
+    if !checker.semantic().seen_module(Modules::RE) {
+        return;
+    }
+
     let Some(method) = checker
         .semantic()
-        .resolve_call_path(&call.func)
-        .and_then(|call_path| match call_path.as_slice() {
+        .resolve_qualified_name(&call.func)
+        .and_then(|qualified_name| match qualified_name.segments() {
             ["re", "sub"] => Some(Method::Sub),
             ["re", "subn"] => Some(Method::Subn),
             ["re", "split"] => Some(Method::Split),
@@ -70,7 +75,7 @@ pub(crate) fn re_sub_positional_args(checker: &mut Checker, call: &ast::ExprCall
     };
 
     if call.arguments.args.len() > method.num_args() {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             ReSubPositionalArgs { method },
             call.range(),
         ));

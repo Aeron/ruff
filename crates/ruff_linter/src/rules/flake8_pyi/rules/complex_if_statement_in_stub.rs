@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, Expr};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -10,54 +10,50 @@ use crate::checkers::ast::Checker;
 /// Checks for `if` statements with complex conditionals in stubs.
 ///
 /// ## Why is this bad?
-/// Stub files support simple conditionals to test for differences in Python
-/// versions and platforms. However, type checkers only understand a limited
-/// subset of these conditionals; complex conditionals may result in false
-/// positives or false negatives.
+/// Type checkers understand simple conditionals to express variations between
+/// different Python versions and platforms. However, complex tests may not be
+/// understood by a type checker, leading to incorrect inferences when they
+/// analyze your code.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if (2, 7) < sys.version_info < (3, 5):
-///     ...
+/// if (3, 10) <= sys.version_info < (3, 12): ...
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info < (3, 5):
-///     ...
+/// if sys.version_info >= (3, 10) and sys.version_info < (3, 12): ...
 /// ```
-#[violation]
-pub struct ComplexIfStatementInStub;
+///
+/// ## References
+/// - [Typing documentation: Version and platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct ComplexIfStatementInStub;
 
 impl Violation for ComplexIfStatementInStub {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(
-            "`if` test must be a simple comparison against `sys.platform` or `sys.version_info`"
-        )
+        "`if` test must be a simple comparison against `sys.platform` or `sys.version_info`"
+            .to_string()
     }
 }
 
 /// PYI002
-pub(crate) fn complex_if_statement_in_stub(checker: &mut Checker, test: &Expr) {
+pub(crate) fn complex_if_statement_in_stub(checker: &Checker, test: &Expr) {
     let Expr::Compare(ast::ExprCompare {
         left, comparators, ..
     }) = test
     else {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(ComplexIfStatementInStub, test.range()));
+        checker.report_diagnostic(Diagnostic::new(ComplexIfStatementInStub, test.range()));
         return;
     };
 
     if comparators.len() != 1 {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(ComplexIfStatementInStub, test.range()));
+        checker.report_diagnostic(Diagnostic::new(ComplexIfStatementInStub, test.range()));
         return;
     }
 
@@ -67,15 +63,16 @@ pub(crate) fn complex_if_statement_in_stub(checker: &mut Checker, test: &Expr) {
 
     if checker
         .semantic()
-        .resolve_call_path(left)
-        .is_some_and(|call_path| {
-            matches!(call_path.as_slice(), ["sys", "version_info" | "platform"])
+        .resolve_qualified_name(left)
+        .is_some_and(|qualified_name| {
+            matches!(
+                qualified_name.segments(),
+                ["sys", "version_info" | "platform"]
+            )
         })
     {
         return;
     }
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(ComplexIfStatementInStub, test.range()));
+    checker.report_diagnostic(Diagnostic::new(ComplexIfStatementInStub, test.range()));
 }

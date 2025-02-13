@@ -1,7 +1,7 @@
 use ruff_python_ast::Expr;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_stdlib::str;
 use ruff_text_size::Ranged;
 
@@ -34,12 +34,12 @@ use crate::rules::pep8_naming::helpers;
 /// ```
 ///
 /// ## Options
-/// - `pep8-naming.ignore-names`
-/// - `pep8-naming.extend-ignore-names`
+/// - `lint.pep8-naming.ignore-names`
+/// - `lint.pep8-naming.extend-ignore-names`
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#function-and-variable-names
-#[violation]
-pub struct NonLowercaseVariableInFunction {
+#[derive(ViolationMetadata)]
+pub(crate) struct NonLowercaseVariableInFunction {
     name: String,
 }
 
@@ -52,18 +52,17 @@ impl Violation for NonLowercaseVariableInFunction {
 }
 
 /// N806
-pub(crate) fn non_lowercase_variable_in_function(checker: &mut Checker, expr: &Expr, name: &str) {
-    if checker
-        .settings
-        .pep8_naming
-        .ignore_names
-        .iter()
-        .any(|ignore_name| ignore_name.matches(name))
-    {
+pub(crate) fn non_lowercase_variable_in_function(checker: &Checker, expr: &Expr, name: &str) {
+    if str::is_lowercase(name) {
         return;
     }
 
-    if str::is_lowercase(name) {
+    // Ignore globals.
+    if checker
+        .semantic()
+        .lookup_symbol(name)
+        .is_some_and(|id| checker.semantic().binding(id).is_global())
+    {
         return;
     }
 
@@ -72,11 +71,17 @@ pub(crate) fn non_lowercase_variable_in_function(checker: &mut Checker, expr: &E
         || helpers::is_typed_dict_assignment(parent, checker.semantic())
         || helpers::is_type_var_assignment(parent, checker.semantic())
         || helpers::is_type_alias_assignment(parent, checker.semantic())
+        || helpers::is_django_model_import(name, parent, checker.semantic())
     {
         return;
     }
 
-    checker.diagnostics.push(Diagnostic::new(
+    // Ignore explicitly-allowed names.
+    if checker.settings.pep8_naming.ignore_names.matches(name) {
+        return;
+    }
+
+    checker.report_diagnostic(Diagnostic::new(
         NonLowercaseVariableInFunction {
             name: name.to_string(),
         },

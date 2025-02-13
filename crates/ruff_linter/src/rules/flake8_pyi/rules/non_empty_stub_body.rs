@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_python_ast::{self as ast, Stmt};
 use ruff_text_size::Ranged;
@@ -10,39 +10,39 @@ use crate::checkers::ast::Checker;
 /// Checks for non-empty function stub bodies.
 ///
 /// ## Why is this bad?
-/// Stub files are meant to be used as a reference for the interface of a
-/// module, and should not contain any implementation details. Thus, the
-/// body of a stub function should be empty.
+/// Stub files are never executed at runtime; they should be thought of as
+/// "data files" for type checkers or IDEs. Function bodies are redundant
+/// for this purpose.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// def double(x: int) -> int:
 ///     return x * 2
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// def double(x: int) -> int: ...
 /// ```
 ///
 /// ## References
-/// - [PEP 484 – Type Hints: Stub Files](https://www.python.org/dev/peps/pep-0484/#stub-files)
-#[violation]
-pub struct NonEmptyStubBody;
+/// - [Typing documentation - Writing and Maintaining Stub Files](https://typing.readthedocs.io/en/latest/guides/writing_stubs.html)
+#[derive(ViolationMetadata)]
+pub(crate) struct NonEmptyStubBody;
 
 impl AlwaysFixableViolation for NonEmptyStubBody {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Function body must contain only `...`")
+        "Function body must contain only `...`".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Replace function body with `...`")
+        "Replace function body with `...`".to_string()
     }
 }
 
 /// PYI010
-pub(crate) fn non_empty_stub_body(checker: &mut Checker, body: &[Stmt]) {
+pub(crate) fn non_empty_stub_body(checker: &Checker, body: &[Stmt]) {
     // Ignore multi-statement bodies (covered by PYI048).
     let [stmt] = body else {
         return;
@@ -67,8 +67,8 @@ pub(crate) fn non_empty_stub_body(checker: &mut Checker, body: &[Stmt]) {
 
     let mut diagnostic = Diagnostic::new(NonEmptyStubBody, stmt.range());
     diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
-        format!("..."),
+        "...".to_string(),
         stmt.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

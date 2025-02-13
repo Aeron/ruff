@@ -1,16 +1,19 @@
-use ast::call_path::{from_qualified_name, CallPath};
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::is_docstring_stmt;
-use ruff_python_ast::{self as ast, Expr, Parameter, ParameterWithDefault};
+use ruff_python_ast::name::QualifiedName;
+use ruff_python_ast::{self as ast, Expr, Parameter};
 use ruff_python_codegen::{Generator, Stylist};
 use ruff_python_index::Indexer;
+use ruff_python_semantic::analyze::function_type::is_stub;
 use ruff_python_semantic::analyze::typing::{is_immutable_annotation, is_mutable_expr};
+use ruff_python_semantic::SemanticModel;
 use ruff_python_trivia::{indentation_at_offset, textwrap};
-use ruff_source_file::Locator;
+use ruff_source_file::LineRanges;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
+use crate::Locator;
 
 /// ## What it does
 /// Checks for uses of mutable objects as function argument defaults.
@@ -28,7 +31,7 @@ use crate::checkers::ast::Checker;
 ///
 /// Arguments with immutable type annotations will be ignored by this rule.
 /// Types outside of the standard library can be marked as immutable with the
-/// [`flake8-bugbear.extend-immutable-calls`] configuration option.
+/// [`lint.flake8-bugbear.extend-immutable-calls`] configuration option.
 ///
 /// ## Known problems
 /// Mutable argument defaults can be used intentionally to cache computation
@@ -61,54 +64,48 @@ use crate::checkers::ast::Checker;
 /// ```
 ///
 /// ## Options
-/// - `flake8-bugbear.extend-immutable-calls`
+/// - `lint.flake8-bugbear.extend-immutable-calls`
 ///
 /// ## References
 /// - [Python documentation: Default Argument Values](https://docs.python.org/3/tutorial/controlflow.html#default-argument-values)
-#[violation]
-pub struct MutableArgumentDefault;
+#[derive(ViolationMetadata)]
+pub(crate) struct MutableArgumentDefault;
 
 impl Violation for MutableArgumentDefault {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Do not use mutable data structures for argument defaults")
+        "Do not use mutable data structures for argument defaults".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
-        Some(format!("Replace with `None`; initialize within function"))
+        Some("Replace with `None`; initialize within function".to_string())
     }
 }
 
 /// B006
-pub(crate) fn mutable_argument_default(checker: &mut Checker, function_def: &ast::StmtFunctionDef) {
-    // Scan in reverse order to right-align zip().
-    for ParameterWithDefault {
-        parameter,
-        default,
-        range: _,
-    } in function_def
-        .parameters
-        .posonlyargs
-        .iter()
-        .chain(&function_def.parameters.args)
-        .chain(&function_def.parameters.kwonlyargs)
-    {
-        let Some(default) = default else {
+pub(crate) fn mutable_argument_default(checker: &Checker, function_def: &ast::StmtFunctionDef) {
+    // Skip stub files
+    if checker.source_type.is_stub() {
+        return;
+    }
+
+    for parameter in function_def.parameters.iter_non_variadic_params() {
+        let Some(default) = parameter.default() else {
             continue;
         };
 
-        let extend_immutable_calls: Vec<CallPath> = checker
+        let extend_immutable_calls: Vec<QualifiedName> = checker
             .settings
             .flake8_bugbear
             .extend_immutable_calls
             .iter()
-            .map(|target| from_qualified_name(target))
+            .map(|target| QualifiedName::from_dotted_name(target))
             .collect();
 
         if is_mutable_expr(default, checker.semantic())
-            && !parameter.annotation.as_ref().is_some_and(|expr| {
+            && !parameter.annotation().is_some_and(|expr| {
                 is_immutable_annotation(expr, checker.semantic(), extend_immutable_calls.as_slice())
             })
         {
@@ -117,8 +114,9 @@ pub(crate) fn mutable_argument_default(checker: &mut Checker, function_def: &ast
             // If the function body is on the same line as the function def, do not fix
             if let Some(fix) = move_initialization(
                 function_def,
-                parameter,
+                &parameter.parameter,
                 default,
+                checker.semantic(),
                 checker.locator(),
                 checker.stylist(),
                 checker.indexer(),
@@ -126,17 +124,19 @@ pub(crate) fn mutable_argument_default(checker: &mut Checker, function_def: &ast
             ) {
                 diagnostic.set_fix(fix);
             }
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }
 
 /// Generate a [`Fix`] to move a mutable argument default initialization
 /// into the function body.
+#[allow(clippy::too_many_arguments)]
 fn move_initialization(
     function_def: &ast::StmtFunctionDef,
     parameter: &Parameter,
     default: &Expr,
+    semantic: &SemanticModel,
     locator: &Locator,
     stylist: &Stylist,
     indexer: &Indexer,
@@ -146,27 +146,32 @@ fn move_initialization(
 
     // Avoid attempting to fix single-line functions.
     let statement = body.peek()?;
-    if indexer.preceded_by_multi_statement_line(statement, locator) {
+    if indexer.preceded_by_multi_statement_line(statement, locator.contents()) {
         return None;
     }
 
     // Set the default argument value to `None`.
     let default_edit = Edit::range_replacement("None".to_string(), default.range());
 
+    // If the function is a stub, this is the only necessary edit.
+    if is_stub(function_def, semantic) {
+        return Some(Fix::unsafe_edit(default_edit));
+    }
+
     // Add an `if`, to set the argument to its original value if still `None`.
     let mut content = String::new();
-    content.push_str(&format!("if {} is None:", parameter.name.as_str()));
+    content.push_str(&format!("if {} is None:", parameter.name()));
     content.push_str(stylist.line_ending().as_str());
     content.push_str(stylist.indentation());
     content.push_str(&format!(
         "{} = {}",
-        parameter.name.as_str(),
+        parameter.name(),
         generator.expr(default)
     ));
     content.push_str(stylist.line_ending().as_str());
 
     // Determine the indentation depth of the function body.
-    let indentation = indentation_at_offset(statement.start(), locator)?;
+    let indentation = indentation_at_offset(statement.start(), locator.contents())?;
 
     // Indent the edit to match the body indentation.
     let mut content = textwrap::indent(&content, indentation).to_string();
@@ -182,7 +187,7 @@ fn move_initialization(
             if let Some(next) = body.peek() {
                 // If there's a second statement, insert _before_ it, but ensure this isn't a
                 // multi-statement line.
-                if indexer.in_multi_statement_line(statement, locator) {
+                if indexer.in_multi_statement_line(statement, locator.contents()) {
                     continue;
                 }
                 pos = locator.line_start(next.start());

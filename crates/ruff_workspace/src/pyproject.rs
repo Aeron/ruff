@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::debug;
 use pep440_rs::VersionSpecifiers;
 use serde::{Deserialize, Serialize};
@@ -41,14 +41,18 @@ impl Pyproject {
 
 /// Parse a `ruff.toml` file.
 fn parse_ruff_toml<P: AsRef<Path>>(path: P) -> Result<Options> {
-    let contents = std::fs::read_to_string(path)?;
-    toml::from_str(&contents).map_err(Into::into)
+    let contents = std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("Failed to read {}", path.as_ref().display()))?;
+    toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse {}", path.as_ref().display()))
 }
 
 /// Parse a `pyproject.toml` file.
 fn parse_pyproject_toml<P: AsRef<Path>>(path: P) -> Result<Pyproject> {
-    let contents = std::fs::read_to_string(path)?;
-    toml::from_str(&contents).map_err(Into::into)
+    let contents = std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("Failed to read {}", path.as_ref().display()))?;
+    toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse {}", path.as_ref().display()))
 }
 
 /// Return `true` if a `pyproject.toml` contains a `[tool.ruff]` section.
@@ -94,36 +98,49 @@ pub fn find_settings_toml<P: AsRef<Path>>(path: P) -> Result<Option<PathBuf>> {
 
 /// Find the path to the user-specific `pyproject.toml` or `ruff.toml`, if it
 /// exists.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn find_user_settings_toml() -> Option<PathBuf> {
-    // Search for a user-specific `.ruff.toml`.
-    let mut path = dirs::config_dir()?;
-    path.push("ruff");
-    path.push(".ruff.toml");
-    if path.is_file() {
-        return Some(path);
+    use etcetera::BaseStrategy;
+    use ruff_linter::warn_user_once;
+
+    let strategy = etcetera::base_strategy::choose_base_strategy().ok()?;
+    let config_dir = strategy.config_dir().join("ruff");
+
+    // Search for a user-specific `.ruff.toml`, then a `ruff.toml`, then a `pyproject.toml`.
+    for filename in [".ruff.toml", "ruff.toml", "pyproject.toml"] {
+        let path = config_dir.join(filename);
+        if path.is_file() {
+            return Some(path);
+        }
     }
 
-    // Search for a user-specific `ruff.toml`.
-    let mut path = dirs::config_dir()?;
-    path.push("ruff");
-    path.push("ruff.toml");
-    if path.is_file() {
-        return Some(path);
-    }
+    // On macOS, we used to support reading from `/Users/Alice/Library/Application Support`.
+    if cfg!(target_os = "macos") {
+        let strategy = etcetera::base_strategy::Apple::new().ok()?;
+        let deprecated_config_dir = strategy.data_dir().join("ruff");
 
-    // Search for a user-specific `pyproject.toml`.
-    let mut path = dirs::config_dir()?;
-    path.push("ruff");
-    path.push("pyproject.toml");
-    if path.is_file() {
-        return Some(path);
+        for file in [".ruff.toml", "ruff.toml", "pyproject.toml"] {
+            let path = deprecated_config_dir.join(file);
+            if path.is_file() {
+                warn_user_once!(
+                    "Reading configuration from `~/Library/Application Support` is deprecated. Please move your configuration to `{}/{file}`.",
+                    config_dir.display(),
+                );
+                return Some(path);
+            }
+        }
     }
 
     None
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn find_user_settings_toml() -> Option<PathBuf> {
+    None
+}
+
 /// Load `Options` from a `pyproject.toml` or `ruff.toml` file.
-pub fn load_options<P: AsRef<Path>>(path: P) -> Result<Options> {
+pub(super) fn load_options<P: AsRef<Path>>(path: P) -> Result<Options> {
     if path.as_ref().ends_with("pyproject.toml") {
         let pyproject = parse_pyproject_toml(&path)?;
         let mut ruff = pyproject
@@ -376,7 +393,7 @@ per-file-ignores = { "__init__.py" = ["F401"] }
         assert!(result.is_err());
         let result = PatternPrefixPair::from_str("**/bar:E501");
         assert!(result.is_ok());
-        let result = PatternPrefixPair::from_str("bar:E502");
+        let result = PatternPrefixPair::from_str("bar:E503");
         assert!(result.is_err());
     }
 }

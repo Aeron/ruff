@@ -1,43 +1,43 @@
-use rustc_hash::FxHashSet;
 use std::fmt;
 
+use rustc_hash::FxHashSet;
+
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr, LiteralExpressionRef};
+use ruff_python_semantic::analyze::typing::traverse_union;
 use ruff_python_semantic::SemanticModel;
 use ruff_text_size::Ranged;
 
+use crate::checkers::ast::Checker;
 use crate::fix::snippet::SourceCodeSnippet;
-use crate::{checkers::ast::Checker, rules::flake8_pyi::helpers::traverse_union};
 
 /// ## What it does
-/// Checks for the presence of redundant `Literal` types and builtin super
-/// types in an union.
+/// Checks for redundant unions between a `Literal` and a builtin supertype of
+/// that `Literal`.
 ///
 /// ## Why is this bad?
-/// The use of `Literal` types in a union with the builtin super type of one of
-/// its literal members is redundant, as the super type is strictly more
-/// general than the `Literal` type.
-///
+/// Using a `Literal` type in a union with its builtin supertype is redundant,
+/// as the supertype will be strictly more general than the `Literal` type.
 /// For example, `Literal["A"] | str` is equivalent to `str`, and
-/// `Literal[1] | int` is equivalent to `int`, as `str` and `int` are the super
-/// types of `"A"` and `1` respectively.
+/// `Literal[1] | int` is equivalent to `int`, as `str` and `int` are the
+/// supertypes of `"A"` and `1` respectively.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// from typing import Literal
 ///
-/// A: Literal["A"] | str
+/// x: Literal["A", b"B"] | str
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// from typing import Literal
 ///
-/// A: Literal["A"]
+/// x: Literal[b"B"] | str
 /// ```
-#[violation]
-pub struct RedundantLiteralUnion {
+#[derive(ViolationMetadata)]
+pub(crate) struct RedundantLiteralUnion {
     literal: SourceCodeSnippet,
     builtin_type: ExprType,
 }
@@ -58,17 +58,17 @@ impl Violation for RedundantLiteralUnion {
 }
 
 /// PYI051
-pub(crate) fn redundant_literal_union<'a>(checker: &mut Checker, union: &'a Expr) {
+pub(crate) fn redundant_literal_union<'a>(checker: &Checker, union: &'a Expr) {
     let mut typing_literal_exprs = Vec::new();
     let mut builtin_types_in_union = FxHashSet::default();
 
     // Adds a member to `literal_exprs` for each value in a `Literal`, and any builtin types
     // to `builtin_types_in_union`.
-    let mut func = |expr: &'a Expr, _| {
+    let mut func = |expr: &'a Expr, _parent: &'a Expr| {
         if let Expr::Subscript(ast::ExprSubscript { value, slice, .. }) = expr {
             if checker.semantic().match_typing_expr(value, "Literal") {
-                if let Expr::Tuple(ast::ExprTuple { elts, .. }) = slice.as_ref() {
-                    typing_literal_exprs.extend(elts.iter());
+                if let Expr::Tuple(tuple) = &**slice {
+                    typing_literal_exprs.extend(tuple);
                 } else {
                     typing_literal_exprs.push(slice);
                 }
@@ -82,7 +82,7 @@ pub(crate) fn redundant_literal_union<'a>(checker: &mut Checker, union: &'a Expr
         builtin_types_in_union.insert(builtin_type);
     };
 
-    traverse_union(&mut func, checker.semantic(), union, None);
+    traverse_union(&mut func, checker.semantic(), union);
 
     for typing_literal_expr in typing_literal_exprs {
         let Some(literal_type) = match_literal_type(typing_literal_expr) else {
@@ -90,7 +90,7 @@ pub(crate) fn redundant_literal_union<'a>(checker: &mut Checker, union: &'a Expr
         };
 
         if builtin_types_in_union.contains(&literal_type) {
-            checker.diagnostics.push(Diagnostic::new(
+            checker.report_diagnostic(Diagnostic::new(
                 RedundantLiteralUnion {
                     literal: SourceCodeSnippet::from_str(
                         checker.locator().slice(typing_literal_expr),
@@ -129,8 +129,7 @@ impl fmt::Display for ExprType {
 /// Return the [`ExprType`] of an [`Expr]` if it is a builtin type (e.g. `int`, `bool`, `float`,
 /// `str`, `bytes`, or `complex`).
 fn match_builtin_type(expr: &Expr, semantic: &SemanticModel) -> Option<ExprType> {
-    let name = expr.as_name_expr()?;
-    let result = match name.id.as_str() {
+    let result = match semantic.resolve_builtin_symbol(expr)? {
         "int" => ExprType::Int,
         "bool" => ExprType::Bool,
         "str" => ExprType::Str,
@@ -139,19 +138,13 @@ fn match_builtin_type(expr: &Expr, semantic: &SemanticModel) -> Option<ExprType>
         "complex" => ExprType::Complex,
         _ => return None,
     };
-    if !semantic.is_builtin(name.id.as_str()) {
-        return None;
-    }
     Some(result)
 }
 
 /// Return the [`ExprType`] of an [`Expr`] if it is a literal (e.g., an `int`, like `1`, or a
 /// `bool`, like `True`).
 fn match_literal_type(expr: &Expr) -> Option<ExprType> {
-    let Some(literal_expr) = expr.as_literal_expr() else {
-        return None;
-    };
-    let result = match literal_expr {
+    Some(match expr.as_literal_expr()? {
         LiteralExpressionRef::BooleanLiteral(_) => ExprType::Bool,
         LiteralExpressionRef::StringLiteral(_) => ExprType::Str,
         LiteralExpressionRef::BytesLiteral(_) => ExprType::Bytes,
@@ -163,6 +156,5 @@ fn match_literal_type(expr: &Expr) -> Option<ExprType> {
         LiteralExpressionRef::NoneLiteral(_) | LiteralExpressionRef::EllipsisLiteral(_) => {
             return None;
         }
-    };
-    Some(result)
+    })
 }

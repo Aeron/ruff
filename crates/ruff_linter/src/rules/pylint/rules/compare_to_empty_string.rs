@@ -3,7 +3,7 @@ use itertools::Itertools;
 use ruff_python_ast::{self as ast, CmpOp, Expr};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -13,8 +13,8 @@ use crate::checkers::ast::Checker;
 ///
 /// ## Why is this bad?
 /// An empty string is falsy, so it is unnecessary to compare it to `""`. If
-/// the value can be something else Python considers falsy, such as `None` or
-/// `0` or another empty container, then the code is not equivalent.
+/// the value can be something else Python considers falsy, such as `None`,
+/// `0`, or another empty container, then the code is not equivalent.
 ///
 /// ## Known problems
 /// High false positive rate, as the check is context-insensitive and does not
@@ -40,8 +40,8 @@ use crate::checkers::ast::Checker;
 /// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
 ///
 /// [#4282]: https://github.com/astral-sh/ruff/issues/4282
-#[violation]
-pub struct CompareToEmptyString {
+#[derive(ViolationMetadata)]
+pub(crate) struct CompareToEmptyString {
     existing: String,
     replacement: String,
 }
@@ -59,7 +59,7 @@ impl Violation for CompareToEmptyString {
 
 /// PLC1901
 pub(crate) fn compare_to_empty_string(
-    checker: &mut Checker,
+    checker: &Checker,
     left: &Expr,
     ops: &[CmpOp],
     comparators: &[Expr],
@@ -76,7 +76,7 @@ pub(crate) fn compare_to_empty_string(
 
     let mut first = true;
     for ((lhs, rhs), op) in std::iter::once(left)
-        .chain(comparators.iter())
+        .chain(comparators)
         .tuple_windows::<(&Expr, &Expr)>()
         .zip(ops)
     {
@@ -89,7 +89,7 @@ pub(crate) fn compare_to_empty_string(
                         let expr = checker.generator().expr(rhs);
                         let existing = format!("{literal} {op} {expr}");
                         let replacement = format!("{}{expr}", op.into_unary());
-                        checker.diagnostics.push(Diagnostic::new(
+                        checker.report_diagnostic(Diagnostic::new(
                             CompareToEmptyString {
                                 existing,
                                 replacement,
@@ -107,7 +107,7 @@ pub(crate) fn compare_to_empty_string(
                     let literal = checker.generator().expr(rhs);
                     let existing = format!("{expr} {op} {literal}");
                     let replacement = format!("{}{expr}", op.into_unary());
-                    checker.diagnostics.push(Diagnostic::new(
+                    checker.report_diagnostic(Diagnostic::new(
                         CompareToEmptyString {
                             existing,
                             replacement,

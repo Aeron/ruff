@@ -7,7 +7,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 
 /// A text edit to be applied to a source file. Inserts, deletes, or replaces
 /// content at a given location.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Edit {
     /// The start location of the edit.
@@ -60,6 +60,10 @@ impl Edit {
     /// Returns the new content for an insertion or deletion.
     pub fn content(&self) -> Option<&str> {
         self.content.as_deref()
+    }
+
+    pub fn into_content(self) -> Option<Box<str>> {
+        self.content
     }
 
     fn kind(&self) -> EditOperationKind {

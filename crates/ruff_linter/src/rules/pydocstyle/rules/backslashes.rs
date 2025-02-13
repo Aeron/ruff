@@ -1,7 +1,5 @@
-use memchr::memchr_iter;
-
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -43,24 +41,24 @@ use crate::docstrings::Docstring;
 /// ## References
 /// - [PEP 257 – Docstring Conventions](https://peps.python.org/pep-0257/)
 /// - [Python documentation: String and Bytes literals](https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals)
-#[violation]
-pub struct EscapeSequenceInDocstring;
+#[derive(ViolationMetadata)]
+pub(crate) struct EscapeSequenceInDocstring;
 
 impl Violation for EscapeSequenceInDocstring {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(r#"Use `r"""` if any backslashes in a docstring"#)
+        r#"Use `r"""` if any backslashes in a docstring"#.to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
-        Some(format!(r#"Add `r` prefix"#))
+        Some(r#"Add `r` prefix"#.to_string())
     }
 }
 
 /// D301
-pub(crate) fn backslashes(checker: &mut Checker, docstring: &Docstring) {
+pub(crate) fn backslashes(checker: &Checker, docstring: &Docstring) {
     // Docstring is already raw.
     if docstring.leading_quote().contains(['r', 'R']) {
         return;
@@ -69,20 +67,47 @@ pub(crate) fn backslashes(checker: &mut Checker, docstring: &Docstring) {
     // Docstring contains at least one backslash.
     let body = docstring.body();
     let bytes = body.as_bytes();
-    if memchr_iter(b'\\', bytes).any(|position| {
-        let escaped_char = bytes.get(position.saturating_add(1));
-        // Allow continuations (backslashes followed by newlines) and Unicode escapes.
-        !matches!(escaped_char, Some(b'\r' | b'\n' | b'u' | b'U' | b'N'))
-    }) {
-        let mut diagnostic = Diagnostic::new(EscapeSequenceInDocstring, docstring.range());
-
-        if !docstring.leading_quote().contains(['u', 'U']) {
-            diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
-                "r".to_owned() + docstring.contents,
-                docstring.range(),
-            )));
+    let mut offset = 0;
+    while let Some(position) = memchr::memchr(b'\\', &bytes[offset..]) {
+        if position + offset + 1 >= body.len() {
+            break;
         }
 
-        checker.diagnostics.push(diagnostic);
+        let after_escape = &body[position + offset + 1..];
+
+        // End of Docstring.
+        let Some(escaped_char) = &after_escape.chars().next() else {
+            break;
+        };
+
+        if matches!(escaped_char, '"' | '\'') {
+            // If the next three characters are equal to """, it indicates an escaped docstring pattern.
+            if after_escape.starts_with("\"\"\"") || after_escape.starts_with("\'\'\'") {
+                offset += position + 3;
+                continue;
+            }
+            // If the next three characters are equal to "\"\", it indicates an escaped docstring pattern.
+            if after_escape.starts_with("\"\\\"\\\"") || after_escape.starts_with("\'\\\'\\\'") {
+                offset += position + 5;
+                continue;
+            }
+        }
+
+        offset += position + escaped_char.len_utf8();
+
+        // Only allow continuations (backslashes followed by newlines) and Unicode escapes.
+        if !matches!(*escaped_char, '\r' | '\n' | 'u' | 'U' | 'N') {
+            let mut diagnostic = Diagnostic::new(EscapeSequenceInDocstring, docstring.range());
+
+            if !docstring.leading_quote().contains(['u', 'U']) {
+                diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
+                    "r".to_owned() + docstring.contents,
+                    docstring.range(),
+                )));
+            }
+
+            checker.report_diagnostic(diagnostic);
+            break;
+        }
     }
 }

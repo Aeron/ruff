@@ -1,6 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::map_starred;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, ExceptHandler, Expr};
 use ruff_text_size::Ranged;
 
@@ -10,6 +9,9 @@ use crate::fix::edits::pad;
 /// ## What it does
 /// Checks for single-element tuples in exception handlers (e.g.,
 /// `except (ValueError,):`).
+///
+/// Note: Single-element tuples consisting of a starred expression
+/// are allowed.
 ///
 /// ## Why is this bad?
 /// A tuple with a single element can be more concisely and idiomatically
@@ -33,15 +35,15 @@ use crate::fix::edits::pad;
 ///
 /// ## References
 /// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
-#[violation]
-pub struct RedundantTupleInExceptionHandler {
+#[derive(ViolationMetadata)]
+pub(crate) struct RedundantTupleInExceptionHandler {
     name: String,
 }
 
 impl AlwaysFixableViolation for RedundantTupleInExceptionHandler {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("A length-one tuple literal is redundant in exception handlers")
+        "A length-one tuple literal is redundant in exception handlers".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -51,10 +53,7 @@ impl AlwaysFixableViolation for RedundantTupleInExceptionHandler {
 }
 
 /// B013
-pub(crate) fn redundant_tuple_in_exception_handler(
-    checker: &mut Checker,
-    handlers: &[ExceptHandler],
-) {
+pub(crate) fn redundant_tuple_in_exception_handler(checker: &Checker, handlers: &[ExceptHandler]) {
     for handler in handlers {
         let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
             type_: Some(type_),
@@ -69,7 +68,17 @@ pub(crate) fn redundant_tuple_in_exception_handler(
         let [elt] = elts.as_slice() else {
             continue;
         };
-        let elt = map_starred(elt);
+        // It is not safe to replace a single-element
+        // tuple consisting of a starred expression
+        // by the unstarred expression because the unstarred
+        // expression can be any iterable whereas `except` must
+        // be followed by a literal or a tuple. For example:
+        // ```python
+        // except (*[ValueError,FileNotFoundError],)
+        // ```
+        if elt.is_starred_expr() {
+            continue;
+        }
         let mut diagnostic = Diagnostic::new(
             RedundantTupleInExceptionHandler {
                 name: checker.generator().expr(elt),
@@ -91,6 +100,6 @@ pub(crate) fn redundant_tuple_in_exception_handler(
             ),
             type_.range(),
         )));
-        checker.diagnostics.push(diagnostic);
+        checker.report_diagnostic(diagnostic);
     }
 }

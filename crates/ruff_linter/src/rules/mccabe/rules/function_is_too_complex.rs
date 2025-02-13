@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, ExceptHandler, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::identifier::Identifier;
 
 /// ## What it does
@@ -44,9 +44,9 @@ use ruff_python_ast::identifier::Identifier;
 /// ```
 ///
 /// ## Options
-/// - `mccabe.max-complexity`
-#[violation]
-pub struct ComplexStructure {
+/// - `lint.mccabe.max-complexity`
+#[derive(ViolationMetadata)]
+pub(crate) struct ComplexStructure {
     name: String,
     complexity: usize,
     max_complexity: usize,
@@ -96,9 +96,26 @@ fn get_complexity_number(stmts: &[Stmt]) -> usize {
                 complexity += get_complexity_number(orelse);
             }
             Stmt::Match(ast::StmtMatch { cases, .. }) => {
-                complexity += 1;
                 for case in cases {
+                    complexity += 1;
                     complexity += get_complexity_number(&case.body);
+                }
+                if let Some(last_case) = cases.last() {
+                    // The complexity of an irrefutable pattern is similar to an `else` block of an `if` statement.
+                    //
+                    // For example:
+                    // ```python
+                    // match subject:
+                    //     case 1: ...
+                    //     case _: ...
+                    //
+                    // match subject:
+                    //     case 1: ...
+                    //     case foo: ...
+                    // ```
+                    if last_case.guard.is_none() && last_case.pattern.is_irrefutable() {
+                        complexity -= 1;
+                    }
                 }
             }
             Stmt::Try(ast::StmtTry {
@@ -160,9 +177,14 @@ pub(crate) fn function_is_too_complex(
 mod tests {
     use anyhow::Result;
 
-    use ruff_python_parser::parse_suite;
+    use ruff_python_ast::Suite;
+    use ruff_python_parser::parse_module;
 
     use super::get_complexity_number;
+
+    fn parse_suite(source: &str) -> Result<Suite> {
+        Ok(parse_module(source)?.into_suite())
+    }
 
     #[test]
     fn trivial() -> Result<()> {
@@ -170,7 +192,7 @@ mod tests {
 def trivial():
     pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -181,7 +203,7 @@ def trivial():
 def expr_as_statement():
     0xF00D
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -194,7 +216,7 @@ def sequential(n):
     s = k + n
     return s
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -210,7 +232,7 @@ def if_elif_else_dead_path(n):
     else:
         return "smaller than or equal to three"
 "#;
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 3);
         Ok(())
     }
@@ -227,7 +249,7 @@ def nested_ifs():
     else:
         return "smaller than or equal to three"
 "#;
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 3);
         Ok(())
     }
@@ -239,7 +261,7 @@ def for_loop():
     for i in range(10):
         print(i)
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 2);
         Ok(())
     }
@@ -253,7 +275,7 @@ def for_else(mylist):
     else:
         print(None)
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 2);
         Ok(())
     }
@@ -267,7 +289,7 @@ def recursive(n):
     else:
         return n
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 2);
         Ok(())
     }
@@ -284,7 +306,7 @@ def nested_functions():
 
     a()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 3);
         Ok(())
     }
@@ -302,7 +324,7 @@ def try_else():
     else:
         print(4)
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 4);
         Ok(())
     }
@@ -319,7 +341,7 @@ def nested_try_finally():
     finally:
         print(3)
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -336,7 +358,7 @@ async def foobar(a, b, c):
     async for x in a:
         pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 3);
         Ok(())
     }
@@ -347,7 +369,7 @@ async def foobar(a, b, c):
 def annotated_assign():
     x: Any = None
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -383,7 +405,7 @@ class Class:
 
         return ServiceProvider(Logger())
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 9);
         Ok(())
     }
@@ -397,7 +419,7 @@ def process_detect_lines():
     finally:
         pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 1);
         Ok(())
     }
@@ -412,7 +434,7 @@ def process_detect_lines():
         if res:
             errors.append(f"Non-zero exit code {res}")
 "#;
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 2);
         Ok(())
     }
@@ -425,7 +447,69 @@ def with_lock():
         if foo:
             print('bar')
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
+        assert_eq!(get_complexity_number(&stmts), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn simple_match_case() -> Result<()> {
+        let source = r"
+def f():
+    match subject:
+        case 2:
+            print('foo')
+        case _:
+            print('bar')
+";
+        let stmts = parse_suite(source)?;
+        assert_eq!(get_complexity_number(&stmts), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_match_case() -> Result<()> {
+        let source = r"
+def f():
+    match subject:
+        case 2:
+            print('foo')
+        case 2:
+            print('bar')
+        case _:
+            print('baz')
+";
+        let stmts = parse_suite(source)?;
+        assert_eq!(get_complexity_number(&stmts), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn named_catch_all_match_case() -> Result<()> {
+        let source = r"
+def f():
+    match subject:
+        case 2:
+            print('hello')
+        case x:
+            print(x)
+";
+        let stmts = parse_suite(source)?;
+        assert_eq!(get_complexity_number(&stmts), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn match_case_catch_all_with_seuqnece() -> Result<()> {
+        let source = r"
+def f():
+    match subject:
+        case 2:
+            print('hello')
+        case 5 | _:
+            print(x)
+";
+        let stmts = parse_suite(source)?;
         assert_eq!(get_complexity_number(&stmts), 2);
         Ok(())
     }

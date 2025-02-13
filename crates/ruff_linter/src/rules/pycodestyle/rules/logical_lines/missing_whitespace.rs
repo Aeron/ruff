@@ -1,12 +1,12 @@
 use ruff_diagnostics::Edit;
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_parser::TokenKind;
-use ruff_text_size::{Ranged, TextSize};
+use ruff_text_size::Ranged;
 
 use crate::checkers::logical_lines::LogicalLinesContext;
 
-use super::LogicalLine;
+use super::{DefinitionState, LogicalLine};
 
 /// ## What it does
 /// Checks for missing whitespace after `,`, `;`, and `:`.
@@ -23,56 +23,46 @@ use super::LogicalLine;
 /// ```python
 /// a = (1, 2)
 /// ```
-#[violation]
-pub struct MissingWhitespace {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingWhitespace {
     token: TokenKind,
-}
-
-impl MissingWhitespace {
-    fn token_text(&self) -> char {
-        match self.token {
-            TokenKind::Colon => ':',
-            TokenKind::Semi => ';',
-            TokenKind::Comma => ',',
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl AlwaysFixableViolation for MissingWhitespace {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let token = self.token_text();
-        format!("Missing whitespace after '{token}'")
+        format!("Missing whitespace after {}", self.token)
     }
 
     fn fix_title(&self) -> String {
-        format!("Add missing whitespace")
+        "Add missing whitespace".to_string()
     }
 }
 
 /// E231
 pub(crate) fn missing_whitespace(line: &LogicalLine, context: &mut LogicalLinesContext) {
-    let mut open_parentheses = 0u32;
     let mut fstrings = 0u32;
-    let mut prev_lsqb = TextSize::default();
-    let mut prev_lbrace = TextSize::default();
+    let mut definition_state = DefinitionState::from_tokens(line.tokens());
+    let mut brackets = Vec::new();
     let mut iter = line.tokens().iter().peekable();
 
     while let Some(token) = iter.next() {
         let kind = token.kind();
+        definition_state.visit_token_kind(kind);
         match kind {
             TokenKind::FStringStart => fstrings += 1,
             TokenKind::FStringEnd => fstrings = fstrings.saturating_sub(1),
             TokenKind::Lsqb if fstrings == 0 => {
-                open_parentheses = open_parentheses.saturating_add(1);
-                prev_lsqb = token.start();
+                brackets.push(kind);
             }
             TokenKind::Rsqb if fstrings == 0 => {
-                open_parentheses = open_parentheses.saturating_sub(1);
+                brackets.pop();
             }
             TokenKind::Lbrace if fstrings == 0 => {
-                prev_lbrace = token.start();
+                brackets.push(kind);
+            }
+            TokenKind::Rbrace if fstrings == 0 => {
+                brackets.pop();
             }
             TokenKind::Colon if fstrings > 0 => {
                 // Colon in f-string, no space required. This will yield false
@@ -97,7 +87,9 @@ pub(crate) fn missing_whitespace(line: &LogicalLine, context: &mut LogicalLinesC
                     if let Some(next_token) = iter.peek() {
                         match (kind, next_token.kind()) {
                             (TokenKind::Colon, _)
-                                if open_parentheses > 0 && prev_lsqb > prev_lbrace =>
+                                if matches!(brackets.last(), Some(TokenKind::Lsqb))
+                                    && !(definition_state.in_type_params()
+                                        && brackets.len() == 1) =>
                             {
                                 continue; // Slice syntax, no space required
                             }
@@ -111,13 +103,10 @@ pub(crate) fn missing_whitespace(line: &LogicalLine, context: &mut LogicalLinesC
                         }
                     }
 
-                    let mut diagnostic =
+                    let diagnostic =
                         Diagnostic::new(MissingWhitespace { token: kind }, token.range());
-                    diagnostic.set_fix(Fix::safe_edit(Edit::insertion(
-                        " ".to_string(),
-                        token.end(),
-                    )));
-                    context.push_diagnostic(diagnostic);
+                    let fix = Fix::safe_edit(Edit::insertion(" ".to_string(), token.end()));
+                    context.push_diagnostic(diagnostic.with_fix(fix));
                 }
             }
             _ => {}

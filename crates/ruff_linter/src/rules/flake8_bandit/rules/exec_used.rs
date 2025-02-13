@@ -1,7 +1,7 @@
 use ruff_python_ast::Expr;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -21,25 +21,19 @@ use crate::checkers::ast::Checker;
 /// ## References
 /// - [Python documentation: `exec`](https://docs.python.org/3/library/functions.html#exec)
 /// - [Common Weakness Enumeration: CWE-78](https://cwe.mitre.org/data/definitions/78.html)
-#[violation]
-pub struct ExecBuiltin;
+#[derive(ViolationMetadata)]
+pub(crate) struct ExecBuiltin;
 
 impl Violation for ExecBuiltin {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use of `exec` detected")
+        "Use of `exec` detected".to_string()
     }
 }
 
 /// S102
-pub(crate) fn exec_used(checker: &mut Checker, func: &Expr) {
-    if checker
-        .semantic()
-        .resolve_call_path(func)
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["" | "builtin", "exec"]))
-    {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(ExecBuiltin, func.range()));
+pub(crate) fn exec_used(checker: &Checker, func: &Expr) {
+    if checker.semantic().match_builtin_expr(func, "exec") {
+        checker.report_diagnostic(Diagnostic::new(ExecBuiltin, func.range()));
     }
 }

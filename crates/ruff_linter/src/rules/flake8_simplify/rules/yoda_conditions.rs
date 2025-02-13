@@ -1,12 +1,13 @@
+use std::cmp;
+
 use anyhow::Result;
 use libcst_native::CompOp;
 
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, CmpOp, Expr, UnaryOp};
 use ruff_python_codegen::Stylist;
 use ruff_python_stdlib::str::{self};
-use ruff_source_file::Locator;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -14,6 +15,7 @@ use crate::cst::helpers::or_space;
 use crate::cst::matchers::{match_comparison, transform_expression};
 use crate::fix::edits::pad;
 use crate::fix::snippet::SourceCodeSnippet;
+use crate::Locator;
 
 /// ## What it does
 /// Checks for conditions that position a constant on the left-hand side of the
@@ -45,8 +47,8 @@ use crate::fix::snippet::SourceCodeSnippet;
 /// ## References
 /// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
 /// - [Python documentation: Assignment statements](https://docs.python.org/3/reference/simple_stmts.html#assignment-statements)
-#[violation]
-pub struct YodaConditions {
+#[derive(ViolationMetadata)]
+pub(crate) struct YodaConditions {
     suggestion: Option<SourceCodeSnippet>,
 }
 
@@ -55,41 +57,79 @@ impl Violation for YodaConditions {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let YodaConditions { suggestion } = self;
-        if let Some(suggestion) = suggestion
-            .as_ref()
-            .and_then(SourceCodeSnippet::full_display)
-        {
-            format!("Yoda conditions are discouraged, use `{suggestion}` instead")
-        } else {
-            format!("Yoda conditions are discouraged")
-        }
+        "Yoda condition detected".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
         let YodaConditions { suggestion } = self;
-        suggestion.as_ref().map(|suggestion| {
-            if let Some(suggestion) = suggestion.full_display() {
-                format!("Replace Yoda condition with `{suggestion}`")
-            } else {
-                format!("Replace Yoda condition")
-            }
-        })
+        suggestion
+            .as_ref()
+            .and_then(|suggestion| suggestion.full_display())
+            .map(|suggestion| format!("Rewrite as `{suggestion}`"))
     }
 }
 
-/// Return `true` if an [`Expr`] is a constant or a constant-like name.
-fn is_constant_like(expr: &Expr) -> bool {
-    match expr {
-        Expr::Attribute(ast::ExprAttribute { attr, .. }) => str::is_cased_uppercase(attr),
-        Expr::Tuple(ast::ExprTuple { elts, .. }) => elts.iter().all(is_constant_like),
-        Expr::Name(ast::ExprName { id, .. }) => str::is_cased_uppercase(id),
-        Expr::UnaryOp(ast::ExprUnaryOp {
-            op: UnaryOp::UAdd | UnaryOp::USub | UnaryOp::Invert,
-            operand,
-            range: _,
-        }) => operand.is_literal_expr(),
-        _ => expr.is_literal_expr(),
+/// Comparisons left-hand side must not be more [`ConstantLikelihood`] than the right-hand side.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum ConstantLikelihood {
+    /// The expression is unlikely to be a constant (e.g., `foo` or `foo(bar)`).
+    Unlikely = 0,
+
+    /// The expression is likely to be a constant (e.g., `FOO`).
+    Probably = 1,
+
+    /// The expression is definitely a constant (e.g., `42` or `"foo"`).
+    Definitely = 2,
+}
+
+impl From<&Expr> for ConstantLikelihood {
+    /// Determine the [`ConstantLikelihood`] of an expression.
+    fn from(expr: &Expr) -> Self {
+        match expr {
+            _ if expr.is_literal_expr() => ConstantLikelihood::Definitely,
+            Expr::Attribute(ast::ExprAttribute { attr, .. }) => {
+                ConstantLikelihood::from_identifier(attr)
+            }
+            Expr::Name(ast::ExprName { id, .. }) => ConstantLikelihood::from_identifier(id),
+            Expr::Tuple(tuple) => tuple
+                .iter()
+                .map(ConstantLikelihood::from)
+                .min()
+                .unwrap_or(ConstantLikelihood::Definitely),
+            Expr::List(list) => list
+                .iter()
+                .map(ConstantLikelihood::from)
+                .min()
+                .unwrap_or(ConstantLikelihood::Definitely),
+            Expr::Dict(dict) => dict
+                .items
+                .iter()
+                .flat_map(|item| std::iter::once(&item.value).chain(item.key.as_ref()))
+                .map(ConstantLikelihood::from)
+                .min()
+                .unwrap_or(ConstantLikelihood::Definitely),
+            Expr::BinOp(ast::ExprBinOp { left, right, .. }) => cmp::min(
+                ConstantLikelihood::from(&**left),
+                ConstantLikelihood::from(&**right),
+            ),
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op: UnaryOp::UAdd | UnaryOp::USub | UnaryOp::Invert,
+                operand,
+                range: _,
+            }) => ConstantLikelihood::from(&**operand),
+            _ => ConstantLikelihood::Unlikely,
+        }
+    }
+}
+
+impl ConstantLikelihood {
+    /// Determine the [`ConstantLikelihood`] of an identifier.
+    fn from_identifier(identifier: &str) -> Self {
+        if str::is_cased_uppercase(identifier) {
+            ConstantLikelihood::Probably
+        } else {
+            ConstantLikelihood::Unlikely
+        }
     }
 }
 
@@ -163,7 +203,7 @@ fn reverse_comparison(expr: &Expr, locator: &Locator, stylist: &Stylist) -> Resu
 
 /// SIM300
 pub(crate) fn yoda_conditions(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     left: &Expr,
     ops: &[CmpOp],
@@ -180,7 +220,7 @@ pub(crate) fn yoda_conditions(
         return;
     }
 
-    if !is_constant_like(left) || is_constant_like(right) {
+    if ConstantLikelihood::from(left) <= ConstantLikelihood::from(right) {
         return;
     }
 
@@ -195,9 +235,9 @@ pub(crate) fn yoda_conditions(
             pad(suggestion, expr.range(), checker.locator()),
             expr.range(),
         )));
-        checker.diagnostics.push(diagnostic);
+        checker.report_diagnostic(diagnostic);
     } else {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             YodaConditions { suggestion: None },
             expr.range(),
         ));

@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 /// ## What it does
 /// Checks for uses of `str.format` to format logging messages.
@@ -30,9 +30,9 @@ use ruff_macros::{derive_message_formats, violation};
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -68,18 +68,18 @@ use ruff_macros::{derive_message_formats, violation};
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging`](https://docs.python.org/3/library/logging.html)
 /// - [Python documentation: Optimization](https://docs.python.org/3/howto/logging.html#optimization)
-#[violation]
-pub struct LoggingStringFormat;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingStringFormat;
 
 impl Violation for LoggingStringFormat {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement uses `str.format`")
+        "Logging statement uses `str.format`".to_string()
     }
 }
 
@@ -114,9 +114,9 @@ impl Violation for LoggingStringFormat {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -152,18 +152,18 @@ impl Violation for LoggingStringFormat {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging`](https://docs.python.org/3/library/logging.html)
 /// - [Python documentation: Optimization](https://docs.python.org/3/howto/logging.html#optimization)
-#[violation]
-pub struct LoggingPercentFormat;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingPercentFormat;
 
 impl Violation for LoggingPercentFormat {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement uses `%`")
+        "Logging statement uses `%`".to_string()
     }
 }
 
@@ -197,9 +197,9 @@ impl Violation for LoggingPercentFormat {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -235,18 +235,18 @@ impl Violation for LoggingPercentFormat {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging`](https://docs.python.org/3/library/logging.html)
 /// - [Python documentation: Optimization](https://docs.python.org/3/howto/logging.html#optimization)
-#[violation]
-pub struct LoggingStringConcat;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingStringConcat;
 
 impl Violation for LoggingStringConcat {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement uses `+`")
+        "Logging statement uses `+`".to_string()
     }
 }
 
@@ -279,9 +279,9 @@ impl Violation for LoggingStringConcat {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -317,18 +317,18 @@ impl Violation for LoggingStringConcat {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging`](https://docs.python.org/3/library/logging.html)
 /// - [Python documentation: Optimization](https://docs.python.org/3/howto/logging.html#optimization)
-#[violation]
-pub struct LoggingFString;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingFString;
 
 impl Violation for LoggingFString {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement uses f-string")
+        "Logging statement uses f-string".to_string()
     }
 }
 
@@ -349,9 +349,9 @@ impl Violation for LoggingFString {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -368,22 +368,22 @@ impl Violation for LoggingFString {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging.warning`](https://docs.python.org/3/library/logging.html#logging.warning)
 /// - [Python documentation: `logging.Logger.warning`](https://docs.python.org/3/library/logging.html#logging.Logger.warning)
-#[violation]
-pub struct LoggingWarn;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingWarn;
 
 impl AlwaysFixableViolation for LoggingWarn {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement uses `warn` instead of `warning`")
+        "Logging statement uses `warn` instead of `warning`".to_string()
     }
 
     fn fix_title(&self) -> String {
-        "Convert to `warn`".to_string()
+        "Convert to `warning`".to_string()
     }
 }
 
@@ -409,9 +409,9 @@ impl AlwaysFixableViolation for LoggingWarn {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -432,16 +432,16 @@ impl AlwaysFixableViolation for LoggingWarn {
 ///
 /// username = "Maria"
 ///
-/// logging.info("Something happened", extra=dict(user=username))
+/// logging.info("Something happened", extra=dict(user_id=username))
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: LogRecord attributes](https://docs.python.org/3/library/logging.html#logrecord-attributes)
-#[violation]
-pub struct LoggingExtraAttrClash(pub String);
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingExtraAttrClash(pub String);
 
 impl Violation for LoggingExtraAttrClash {
     #[derive_message_formats]
@@ -470,9 +470,9 @@ impl Violation for LoggingExtraAttrClash {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -495,20 +495,21 @@ impl Violation for LoggingExtraAttrClash {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging.exception`](https://docs.python.org/3/library/logging.html#logging.exception)
 /// - [Python documentation: `exception`](https://docs.python.org/3/library/logging.html#logging.Logger.exception)
 /// - [Python documentation: `logging.error`](https://docs.python.org/3/library/logging.html#logging.error)
 /// - [Python documentation: `error`](https://docs.python.org/3/library/logging.html#logging.Logger.error)
-#[violation]
-pub struct LoggingExcInfo;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingExcInfo;
 
 impl Violation for LoggingExcInfo {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging `.exception(...)` should be used instead of `.error(..., exc_info=True)`")
+        "Logging `.exception(...)` should be used instead of `.error(..., exc_info=True)`"
+            .to_string()
     }
 }
 
@@ -531,9 +532,9 @@ impl Violation for LoggingExcInfo {
 /// - Uses of `flask.current_app.logger` (e.g., `from flask import current_app; current_app.logger.info(...)`).
 /// - Objects whose name starts with `log` or ends with `logger` or `logging`,
 ///   when used in the same file in which they are defined (e.g., `logger = logging.getLogger(); logger.info(...)`).
-/// - Imported objects marked as loggers via the [`logger-objects`] setting, which can be
+/// - Imported objects marked as loggers via the [`lint.logger-objects`] setting, which can be
 ///   used to enforce these rules against shared logger objects (e.g., `from module import logger; logger.info(...)`,
-///   when [`logger-objects`] is set to `["module.logger"]`).
+///   when [`lint.logger-objects`] is set to `["module.logger"]`).
 ///
 /// ## Example
 /// ```python
@@ -556,19 +557,19 @@ impl Violation for LoggingExcInfo {
 /// ```
 ///
 /// ## Options
-/// - `logger-objects`
+/// - `lint.logger-objects`
 ///
 /// ## References
 /// - [Python documentation: `logging.exception`](https://docs.python.org/3/library/logging.html#logging.exception)
 /// - [Python documentation: `exception`](https://docs.python.org/3/library/logging.html#logging.Logger.exception)
 /// - [Python documentation: `logging.error`](https://docs.python.org/3/library/logging.html#logging.error)
 /// - [Python documentation: `error`](https://docs.python.org/3/library/logging.html#logging.Logger.error)
-#[violation]
-pub struct LoggingRedundantExcInfo;
+#[derive(ViolationMetadata)]
+pub(crate) struct LoggingRedundantExcInfo;
 
 impl Violation for LoggingRedundantExcInfo {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Logging statement has redundant `exc_info`")
+        "Logging statement has redundant `exc_info`".to_string()
     }
 }

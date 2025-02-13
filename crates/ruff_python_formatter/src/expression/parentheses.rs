@@ -1,7 +1,7 @@
 use ruff_formatter::prelude::tag::Condition;
 use ruff_formatter::{format_args, write, Argument, Arguments};
 use ruff_python_ast::AnyNodeRef;
-use ruff_python_ast::ExpressionRef;
+use ruff_python_ast::ExprRef;
 use ruff_python_trivia::CommentRanges;
 use ruff_python_trivia::{
     first_non_trivia_token, BackwardsTokenizer, SimpleToken, SimpleTokenKind,
@@ -56,10 +56,19 @@ pub(crate) enum Parenthesize {
     /// Adding parentheses is desired to prevent the comments from wandering.
     IfRequired,
 
-    /// Parenthesizes the expression if the group doesn't fit on a line (e.g., even name expressions are parenthesized), or if
-    /// the expression doesn't break, but _does_ reports that it always requires parentheses in this position (e.g., walrus
-    /// operators in function return annotations).
-    IfBreaksOrIfRequired,
+    /// Same as [`Self::IfBreaks`] except that it uses [`parenthesize_if_expands`] for expressions
+    /// with the layout [`NeedsParentheses::BestFit`] which is used by non-splittable
+    /// expressions like literals, name, and strings.
+    ///
+    /// Use this layout over `IfBreaks` when there's a sequence of `maybe_parenthesize_expression`
+    /// in a single logical-line and you want to break from right-to-left. Use `IfBreaks` for the
+    /// first expression and `IfBreaksParenthesized` for the rest.
+    IfBreaksParenthesized,
+
+    /// Same as [`Self::IfBreaksParenthesized`] but uses [`parenthesize_if_expands`] for nested
+    /// [`maybe_parenthesized_expression`] calls unlike other layouts that always omit parentheses
+    /// when outer parentheses are present.
+    IfBreaksParenthesizedNested,
 }
 
 impl Parenthesize {
@@ -84,8 +93,9 @@ pub enum Parentheses {
     Never,
 }
 
+/// Returns `true` if the [`ExprRef`] is enclosed by parentheses in the source code.
 pub(crate) fn is_expression_parenthesized(
-    expr: ExpressionRef,
+    expr: ExprRef,
     comment_ranges: &CommentRanges,
     contents: &str,
 ) -> bool {
@@ -125,6 +135,7 @@ where
     FormatParenthesized {
         left,
         comments: &[],
+        hug: false,
         content: Argument::new(content),
         right,
     }
@@ -133,6 +144,7 @@ where
 pub(crate) struct FormatParenthesized<'content, 'ast> {
     left: &'static str,
     comments: &'content [SourceComment],
+    hug: bool,
     content: Argument<'content, PyFormatContext<'ast>>,
     right: &'static str,
 }
@@ -153,18 +165,32 @@ impl<'content, 'ast> FormatParenthesized<'content, 'ast> {
     ) -> FormatParenthesized<'content, 'ast> {
         FormatParenthesized { comments, ..self }
     }
+
+    /// Whether to indent the content within the parentheses.
+    pub(crate) fn with_hugging(self, hug: bool) -> FormatParenthesized<'content, 'ast> {
+        FormatParenthesized { hug, ..self }
+    }
 }
 
 impl<'ast> Format<PyFormatContext<'ast>> for FormatParenthesized<'_, 'ast> {
     fn fmt(&self, f: &mut Formatter<PyFormatContext<'ast>>) -> FormatResult<()> {
         let current_level = f.context().node_level();
 
-        let content = format_with(|f| {
-            group(&format_args![
-                dangling_open_parenthesis_comments(self.comments),
-                soft_block_indent(&Arguments::from(&self.content))
-            ])
-            .fmt(f)
+        let indented = format_with(|f| {
+            let content = Arguments::from(&self.content);
+            if self.comments.is_empty() {
+                if self.hug {
+                    content.fmt(f)
+                } else {
+                    group(&soft_block_indent(&content)).fmt(f)
+                }
+            } else {
+                group(&format_args![
+                    dangling_open_parenthesis_comments(self.comments),
+                    soft_block_indent(&content),
+                ])
+                .fmt(f)
+            }
         });
 
         let inner = format_with(|f| {
@@ -173,12 +199,12 @@ impl<'ast> Format<PyFormatContext<'ast>> for FormatParenthesized<'_, 'ast> {
                 // This ensures that expanding this parenthesized expression does not expand the optional parentheses group.
                 write!(
                     f,
-                    [fits_expanded(&content)
+                    [fits_expanded(&indented)
                         .with_condition(Some(Condition::if_group_fits_on_line(group_id)))]
                 )
             } else {
                 // It's not necessary to wrap the content if it is not inside of an optional_parentheses group.
-                content.fmt(f)
+                indented.fmt(f)
             }
         });
 
@@ -342,6 +368,26 @@ pub(super) fn write_in_parentheses_only_group_end_tag(f: &mut PyFormatter) {
     }
 }
 
+/// Shows prints `content` only if the expression is enclosed by (optional) parentheses (`()`, `[]`, or `{}`)
+/// and splits across multiple lines.
+pub(super) fn in_parentheses_only_if_group_breaks<'a, T>(
+    content: T,
+) -> impl Format<PyFormatContext<'a>>
+where
+    T: Format<PyFormatContext<'a>>,
+{
+    format_with(move |f: &mut PyFormatter| match f.context().node_level() {
+        NodeLevel::TopLevel(_) | NodeLevel::CompoundStatement | NodeLevel::Expression(None) => {
+            // no-op, not parenthesized
+            Ok(())
+        }
+        NodeLevel::Expression(Some(parentheses_id)) => if_group_breaks(&content)
+            .with_group_id(Some(parentheses_id))
+            .fmt(f),
+        NodeLevel::ParenthesizedExpression => if_group_breaks(&content).fmt(f),
+    })
+}
+
 /// Format comments inside empty parentheses, brackets or curly braces.
 ///
 /// Empty `()`, `[]` and `{}` are special because there can be dangling comments, and they can be in
@@ -379,33 +425,31 @@ impl Format<PyFormatContext<'_>> for FormatEmptyParenthesized<'_> {
         debug_assert!(self.comments[end_of_line_split..]
             .iter()
             .all(|comment| comment.line_position().is_own_line()));
-        write!(
-            f,
-            [group(&format_args![
-                token(self.left),
-                // end-of-line comments
-                trailing_comments(&self.comments[..end_of_line_split]),
-                // Avoid unstable formatting with
-                // ```python
-                // x = () - (#
-                // )
-                // ```
-                // Without this the comment would go after the empty tuple first, but still expand
-                // the bin op. In the second formatting pass they are trailing bin op comments
-                // so the bin op collapse. Suboptimally we keep parentheses around the bin op in
-                // either case.
-                (!self.comments[..end_of_line_split].is_empty()).then_some(hard_line_break()),
-                // own line comments, which need to be indented
-                soft_block_indent(&dangling_comments(&self.comments[end_of_line_split..])),
-                token(self.right)
-            ])]
-        )
+        group(&format_args![
+            token(self.left),
+            // end-of-line comments
+            trailing_comments(&self.comments[..end_of_line_split]),
+            // Avoid unstable formatting with
+            // ```python
+            // x = () - (#
+            // )
+            // ```
+            // Without this the comment would go after the empty tuple first, but still expand
+            // the bin op. In the second formatting pass they are trailing bin op comments
+            // so the bin op collapse. Suboptimally we keep parentheses around the bin op in
+            // either case.
+            (!self.comments[..end_of_line_split].is_empty()).then_some(hard_line_break()),
+            // own line comments, which need to be indented
+            soft_block_indent(&dangling_comments(&self.comments[end_of_line_split..])),
+            token(self.right)
+        ])
+        .fmt(f)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ruff_python_ast::ExpressionRef;
+    use ruff_python_ast::ExprRef;
     use ruff_python_parser::parse_expression;
     use ruff_python_trivia::CommentRanges;
 
@@ -414,9 +458,9 @@ mod tests {
     #[test]
     fn test_has_parentheses() {
         let expression = r#"(b().c("")).d()"#;
-        let expr = parse_expression(expression, "<filename>").unwrap();
+        let parsed = parse_expression(expression).unwrap();
         assert!(!is_expression_parenthesized(
-            ExpressionRef::from(&expr),
+            ExprRef::from(parsed.expr()),
             &CommentRanges::default(),
             expression
         ));

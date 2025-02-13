@@ -1,8 +1,9 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::call_path::compose_call_path;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers;
+use ruff_python_ast::name::UnqualifiedName;
 use ruff_python_ast::{self as ast, ExceptHandler, Stmt};
+use ruff_source_file::LineRanges;
 use ruff_text_size::Ranged;
 use ruff_text_size::{TextLen, TextRange};
 
@@ -41,8 +42,8 @@ use crate::importer::ImportRequest;
 /// - [Python documentation: `contextlib.suppress`](https://docs.python.org/3/library/contextlib.html#contextlib.suppress)
 /// - [Python documentation: `try` statement](https://docs.python.org/3/reference/compound_stmts.html#the-try-statement)
 /// - [a simpler `try`/`except` (and why maybe shouldn't)](https://www.youtube.com/watch?v=MZAJ8qnC7mk)
-#[violation]
-pub struct SuppressibleException {
+#[derive(ViolationMetadata)]
+pub(crate) struct SuppressibleException {
     exception: String,
 }
 
@@ -71,7 +72,7 @@ fn is_empty(body: &[Stmt]) -> bool {
 
 /// SIM105
 pub(crate) fn suppressible_exception(
-    checker: &mut Checker,
+    checker: &Checker,
     stmt: &Stmt,
     try_body: &[Stmt],
     handlers: &[ExceptHandler],
@@ -107,7 +108,7 @@ pub(crate) fn suppressible_exception(
 
     let Some(handler_names) = helpers::extract_handled_exceptions(handlers)
         .into_iter()
-        .map(compose_call_path)
+        .map(|expr| UnqualifiedName::from_expr(expr).map(|name| name.to_string()))
         .collect::<Option<Vec<String>>>()
     else {
         return;
@@ -125,10 +126,11 @@ pub(crate) fn suppressible_exception(
         },
         stmt.range(),
     );
-    if !checker.indexer().has_comments(stmt, checker.locator()) {
+    if !checker
+        .comment_ranges()
+        .has_comments(stmt, checker.source())
+    {
         diagnostic.try_set_fix(|| {
-            // let range = statement_range(stmt, checker.locator(), checker.indexer());
-
             let (import_edit, binding) = checker.importer().get_or_import_symbol(
                 &ImportRequest::import("contextlib", "suppress"),
                 stmt.start(),
@@ -145,5 +147,5 @@ pub(crate) fn suppressible_exception(
             ))
         });
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

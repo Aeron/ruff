@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_python_formatter/tests/fixtures.rs
 input_file: crates/ruff_python_formatter/resources/test/fixtures/ruff/expression/named_expr.py
+snapshot_kind: text
 ---
 ## Input
 ```python
@@ -76,8 +77,6 @@ for x in (y := [1, 2, 3]):
 
 async for x in (y := [1, 2, 3]):
     pass
-
-del (x := 1)
 
 try:
     pass
@@ -180,8 +179,6 @@ for x in (y := [1, 2, 3]):
 async for x in (y := [1, 2, 3]):
     pass
 
-del (x := 1)
-
 try:
     pass
 except (e := Exception):
@@ -207,6 +204,3 @@ def f():
 async def f():
     await (x := 1)
 ```
-
-
-

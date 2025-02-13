@@ -6,6 +6,7 @@ use itertools::Itertools;
 use ruff_text_size::{TextRange, TextSize};
 
 use crate::schema::{Cell, SourceValue};
+use crate::CellMetadata;
 
 impl fmt::Display for SourceValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -23,11 +24,23 @@ impl fmt::Display for SourceValue {
 
 impl Cell {
     /// Return the [`SourceValue`] of the cell.
-    pub(crate) fn source(&self) -> &SourceValue {
+    pub fn source(&self) -> &SourceValue {
         match self {
             Cell::Code(cell) => &cell.source,
             Cell::Markdown(cell) => &cell.source,
             Cell::Raw(cell) => &cell.source,
+        }
+    }
+
+    pub fn is_code_cell(&self) -> bool {
+        matches!(self, Cell::Code(_))
+    }
+
+    pub fn metadata(&self) -> &CellMetadata {
+        match self {
+            Cell::Code(cell) => &cell.metadata,
+            Cell::Markdown(cell) => &cell.metadata,
+            Cell::Raw(cell) => &cell.metadata,
         }
     }
 
@@ -42,11 +55,21 @@ impl Cell {
 
     /// Return `true` if it's a valid code cell.
     ///
-    /// A valid code cell is a cell where the cell type is [`Cell::Code`] and the
-    /// source doesn't contain a cell magic.
-    pub(crate) fn is_valid_code_cell(&self) -> bool {
+    /// A valid code cell is a cell where:
+    /// 1. The cell type is [`Cell::Code`]
+    /// 2. The source doesn't contain a cell magic
+    /// 3. If the language id is set, it should be `python`
+    pub(crate) fn is_valid_python_code_cell(&self) -> bool {
         let source = match self {
-            Cell::Code(cell) => &cell.source,
+            Cell::Code(cell)
+                if cell
+                    .metadata
+                    .vscode
+                    .as_ref()
+                    .map_or(true, |vscode| vscode.language_id == "python") =>
+            {
+                &cell.source
+            }
             _ => return false,
         };
         // Ignore cells containing cell magic as they act on the entire cell
@@ -80,10 +103,11 @@ impl Cell {
         // ```
         //
         // See: https://ipython.readthedocs.io/en/stable/interactive/magics.html
-        if lines
-            .peek()
-            .and_then(|line| line.split_whitespace().next())
-            .is_some_and(|token| {
+        if let Some(line) = lines.peek() {
+            let mut tokens = line.split_whitespace();
+
+            // The first token must be an automagic, like `load_exit`.
+            if tokens.next().is_some_and(|token| {
                 matches!(
                     token,
                     "alias"
@@ -164,18 +188,76 @@ impl Cell {
                         | "xdel"
                         | "xmode"
                 )
-            })
-        {
-            return true;
+            }) {
+                // The second token must _not_ be an operator, like `=` (to avoid false positives).
+                // The assignment operators can never follow an automagic. Some binary operators
+                // _can_, though (e.g., `cd -` is valid), so we omit them.
+                if !tokens.next().is_some_and(|token| {
+                    matches!(
+                        token,
+                        "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "**=" | "&=" | "|=" | "^="
+                    )
+                }) {
+                    return true;
+                }
+            }
         }
 
         // Detect cell magics (which operate on multiple lines).
-        lines.any(|line| line.trim_start().starts_with("%%"))
+        lines.any(|line| {
+            let Some(first) = line.split_whitespace().next() else {
+                return false;
+            };
+            if first.len() < 2 {
+                return false;
+            }
+            let Some(command) = first.strip_prefix("%%") else {
+                return false;
+            };
+            // These cell magics are special in that the lines following them are valid
+            // Python code and the variables defined in that scope are available to the
+            // rest of the notebook.
+            //
+            // For example:
+            //
+            // Cell 1:
+            // ```python
+            // x = 1
+            // ```
+            //
+            // Cell 2:
+            // ```python
+            // %%time
+            // y = x
+            // ```
+            //
+            // Cell 3:
+            // ```python
+            // print(y)  # Here, `y` is available.
+            // ```
+            //
+            // This is to avoid false positives when these variables are referenced
+            // elsewhere in the notebook.
+            //
+            // Refer https://github.com/astral-sh/ruff/issues/13718 for `ipytest`.
+            !matches!(
+                command,
+                "capture"
+                    | "debug"
+                    | "ipytest"
+                    | "prun"
+                    | "pypy"
+                    | "python"
+                    | "python3"
+                    | "time"
+                    | "timeit"
+            )
+        })
     }
 }
 
 /// Cell offsets are used to keep track of the start and end offsets of each
-/// cell in the concatenated source code.
+/// cell in the concatenated source code. These offsets are in sorted order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CellOffsets(Vec<TextSize>);
 
@@ -186,7 +268,17 @@ impl CellOffsets {
     }
 
     /// Push a new offset to the end of the [`CellOffsets`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset is less than the last offset pushed.
     pub(crate) fn push(&mut self, offset: TextSize) {
+        if let Some(last_offset) = self.0.last() {
+            assert!(
+                *last_offset <= offset,
+                "Offsets must be pushed in sorted order"
+            );
+        }
         self.0.push(offset);
     }
 
@@ -199,6 +291,22 @@ impl CellOffsets {
                 None
             }
         })
+    }
+
+    /// Returns `true` if the given range contains a cell boundary.
+    pub fn has_cell_boundary(&self, range: TextRange) -> bool {
+        self.binary_search_by(|offset| {
+            if range.start() <= *offset {
+                if range.end() < *offset {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            } else {
+                std::cmp::Ordering::Less
+            }
+        })
+        .is_ok()
     }
 }
 

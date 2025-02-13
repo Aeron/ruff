@@ -1,8 +1,7 @@
-use ruff_python_ast::{self as ast, Decorator, Expr, Parameters, Stmt};
-
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::identifier::Identifier;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{identifier::Identifier, Decorator, Parameters, Stmt};
+use ruff_python_semantic::analyze::visibility::is_property;
 
 use crate::checkers::ast::Checker;
 
@@ -16,60 +15,48 @@ use crate::checkers::ast::Checker;
 /// desired parameters and call that method instead.
 ///
 /// ## Example
+///
 /// ```python
 /// class Cat:
 ///     @property
-///     def purr(self, volume):
-///         ...
+///     def purr(self, volume): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// class Cat:
 ///     @property
-///     def purr(self):
-///         ...
+///     def purr(self): ...
 ///
-///     def purr_volume(self, volume):
-///         ...
+///     def purr_volume(self, volume): ...
 /// ```
 ///
 /// ## References
 /// - [Python documentation: `property`](https://docs.python.org/3/library/functions.html#property)
-#[violation]
-pub struct PropertyWithParameters;
+#[derive(ViolationMetadata)]
+pub(crate) struct PropertyWithParameters;
 
 impl Violation for PropertyWithParameters {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Cannot have defined parameters for properties")
+        "Cannot have defined parameters for properties".to_string()
     }
 }
 
 /// PLR0206
 pub(crate) fn property_with_parameters(
-    checker: &mut Checker,
+    checker: &Checker,
     stmt: &Stmt,
     decorator_list: &[Decorator],
     parameters: &Parameters,
 ) {
-    if !decorator_list
-        .iter()
-        .any(|decorator| matches!(&decorator.expression, Expr::Name(ast::ExprName { id, .. }) if id == "property"))
-    {
+    if parameters.len() <= 1 {
         return;
     }
-    if parameters
-        .posonlyargs
-        .iter()
-        .chain(&parameters.args)
-        .chain(&parameters.kwonlyargs)
-        .count()
-        > 1
-        && checker.semantic().is_builtin("property")
-    {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(PropertyWithParameters, stmt.identifier()));
+    let semantic = checker.semantic();
+    let extra_property_decorators = checker.settings.pydocstyle.property_decorators();
+    if is_property(decorator_list, extra_property_decorators, semantic) {
+        checker.report_diagnostic(Diagnostic::new(PropertyWithParameters, stmt.identifier()));
     }
 }

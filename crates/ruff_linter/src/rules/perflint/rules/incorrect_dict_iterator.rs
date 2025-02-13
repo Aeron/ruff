@@ -1,13 +1,13 @@
 use std::fmt;
 
-use crate::fix::edits::pad;
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast as ast;
 use ruff_python_ast::{Arguments, Expr};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
+use crate::fix::edits::pad;
 
 /// ## What it does
 /// Checks for uses of `dict.items()` that discard either the key or the value
@@ -37,8 +37,14 @@ use crate::checkers::ast::Checker;
 /// for value in obj.values():
 ///     print(value)
 /// ```
-#[violation]
-pub struct IncorrectDictIterator {
+///
+/// ## Fix safety
+/// The fix does not perform any type analysis and, as such, may suggest an
+/// incorrect fix if the object in question does not duck-type as a mapping
+/// (e.g., if it is missing a `.keys()` or `.values()` method, or if those
+/// methods behave differently than they do on standard mapping types).
+#[derive(ViolationMetadata)]
+pub(crate) struct IncorrectDictIterator {
     subset: DictSubset,
 }
 
@@ -56,7 +62,7 @@ impl AlwaysFixableViolation for IncorrectDictIterator {
 }
 
 /// PERF102
-pub(crate) fn incorrect_dict_iterator(checker: &mut Checker, stmt_for: &ast::StmtFor) {
+pub(crate) fn incorrect_dict_iterator(checker: &Checker, stmt_for: &ast::StmtFor) {
     let Expr::Tuple(ast::ExprTuple { elts, .. }) = stmt_for.target.as_ref() else {
         return;
     };
@@ -109,7 +115,7 @@ pub(crate) fn incorrect_dict_iterator(checker: &mut Checker, stmt_for: &ast::Stm
                 stmt_for.target.range(),
             );
             diagnostic.set_fix(Fix::unsafe_edits(replace_attribute, [replace_target]));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
         (false, true) => {
             // The value is unused, so replace with `dict.keys()`.
@@ -129,7 +135,7 @@ pub(crate) fn incorrect_dict_iterator(checker: &mut Checker, stmt_for: &ast::Stm
                 stmt_for.target.range(),
             );
             diagnostic.set_fix(Fix::unsafe_edits(replace_attribute, [replace_target]));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

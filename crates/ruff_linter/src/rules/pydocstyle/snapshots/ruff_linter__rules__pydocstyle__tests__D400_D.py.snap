@@ -194,23 +194,13 @@ D.py:487:5: D400 [*] First line should end with a period
 489 489 | 
 490 490 | 
 
-D.py:514:5: D400 [*] First line should end with a period
+D.py:514:5: D400 First line should end with a period
     |
 513 | def valid_google_string():  # noqa: D400
 514 |     """Test a valid something!"""
     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ D400
     |
     = help: Add period
-
-ℹ Unsafe fix
-511 511 | 
-512 512 | 
-513 513 | def valid_google_string():  # noqa: D400
-514     |-    """Test a valid something!"""
-    514 |+    """Test a valid something!."""
-515 515 | 
-516 516 | 
-517 517 | @expect("D415: First line should end with a period, question mark, "
 
 D.py:520:5: D400 [*] First line should end with a period
     |
@@ -254,9 +244,8 @@ D.py:615:5: D400 [*] First line should end with a period
     |
 613 |   @expect('D212: Multi-line docstring summary should start at the first line')
 614 |   def one_liner():
-615 |       """Wrong."
-    |  _____^
-616 | | 
+615 | /     """Wrong."
+616 | |
 617 | |     """
     | |_______^ D400
     |
@@ -276,7 +265,7 @@ D.py:639:17: D400 [*] First line should end with a period
     |
 639 | class SameLine: """This is a docstring on the same line"""
     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ D400
-640 | 
+640 |
 641 | def same_line(): """This is a docstring on the same line"""
     |
     = help: Add period
@@ -294,7 +283,7 @@ D.py:639:17: D400 [*] First line should end with a period
 D.py:641:18: D400 [*] First line should end with a period
     |
 639 | class SameLine: """This is a docstring on the same line"""
-640 | 
+640 |
 641 | def same_line(): """This is a docstring on the same line"""
     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ D400
     |
@@ -313,8 +302,7 @@ D.py:641:18: D400 [*] First line should end with a period
 D.py:664:5: D400 [*] First line should end with a period
     |
 663 |   def newline_after_closing_quote(self):
-664 |       "We enforce a newline after the closing quote for a multi-line docstring \
-    |  _____^
+664 | /     "We enforce a newline after the closing quote for a multi-line docstring \
 665 | |     but continuations shouldn't be considered multi-line"
     | |_________________________________________________________^ D400
     |
@@ -328,6 +316,4 @@ D.py:664:5: D400 [*] First line should end with a period
     665 |+    but continuations shouldn't be considered multi-line."
 666 666 | 
 667 667 | 
-668 668 | 
-
-
+668 668 |

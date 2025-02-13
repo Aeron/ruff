@@ -9,6 +9,7 @@ Example usage:
 
     scripts/check_ecosystem.py <path/to/ruff1> <path/to/ruff2>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -103,9 +104,9 @@ class Repository(NamedTuple):
             stdout=PIPE,
         )
         git_sha_stdout, _ = await git_sha_process.communicate()
-        assert (
-            await git_sha_process.wait() == 0
-        ), f"Failed to retrieve commit sha at {checkout_dir}"
+        assert await git_sha_process.wait() == 0, (
+            f"Failed to retrieve commit sha at {checkout_dir}"
+        )
         return git_sha_stdout.decode().strip()
 
 
@@ -120,17 +121,22 @@ REPOSITORIES: list[Repository] = [
     Repository("aiven", "aiven-client", "main"),
     Repository("alteryx", "featuretools", "main"),
     Repository("apache", "airflow", "main", select="ALL"),
+    Repository("apache", "superset", "master", select="ALL"),
     Repository("aws", "aws-sam-cli", "develop"),
+    Repository("binary-husky", "gpt_academic", "master"),
     Repository("bloomberg", "pytest-memray", "main"),
     Repository("bokeh", "bokeh", "branch-3.3", select="ALL"),
-    Repository("commaai", "openpilot", "master"),
-    Repository("demisto", "content", "master"),
+    # Disabled due to use of explicit `select` with `E999`, which has been removed.
+    # See: https://github.com/astral-sh/ruff/pull/12129
+    # Repository("demisto", "content", "master"),
     Repository("docker", "docker-py", "main"),
+    Repository("facebookresearch", "chameleon", "main"),
     Repository("freedomofpress", "securedrop", "develop"),
     Repository("fronzbot", "blinkpy", "dev"),
     Repository("ibis-project", "ibis", "master"),
     Repository("ing-bank", "probatus", "main"),
     Repository("jrnl-org", "jrnl", "develop"),
+    Repository("langchain-ai", "langchain", "main"),
     Repository("latchbio", "latch", "main"),
     Repository("lnbits", "lnbits", "main"),
     Repository("milvus-io", "pymilvus", "master"),
@@ -145,6 +151,7 @@ REPOSITORIES: list[Repository] = [
     Repository("python", "mypy", "master"),
     Repository("python", "typeshed", "main", select="PYI"),
     Repository("python-poetry", "poetry", "master"),
+    Repository("qdrant", "qdrant-client", "master"),
     Repository("reflex-dev", "reflex", "main"),
     Repository("rotki", "rotki", "develop"),
     Repository("scikit-build", "scikit-build", "main"),
@@ -183,7 +190,7 @@ async def check(
     if exclude:
         ruff_args.extend(["--exclude", exclude])
     if show_fixes:
-        ruff_args.extend(["--show-fixes", "--ecosystem-ci"])
+        ruff_args.extend(["--show-fixes"])
 
     start = time.time()
     proc = await create_subprocess_exec(
@@ -442,7 +449,7 @@ async def main(
 
                     if matches is None:
                         # Handle case where there are no regex matches e.g.
-                        # +                 "?application=AIRFLOW&authenticator=TEST_AUTH&role=TEST_ROLE&warehouse=TEST_WAREHOUSE" # noqa: E501, ERA001
+                        # +                 "?application=AIRFLOW&authenticator=TEST_AUTH&role=TEST_ROLE&warehouse=TEST_WAREHOUSE"
                         # Which was found in local testing
                         continue
 

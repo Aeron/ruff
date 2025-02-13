@@ -1,7 +1,10 @@
 ---
 source: crates/ruff_python_parser/src/lexer.rs
 expression: lex_jupyter_source(source)
+snapshot_kind: text
 ---
+## Tokens
+```
 [
     (
         If,
@@ -39,3 +42,4 @@ expression: lex_jupyter_source(source)
         43..43,
     ),
 ]
+```

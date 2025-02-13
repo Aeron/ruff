@@ -1,5 +1,6 @@
 ---
 source: crates/ruff_linter/src/rules/flake8_pyi/mod.rs
+snapshot_kind: text
 ---
 PYI046.pyi:5:7: PYI046 Private protocol `_Foo` is never used
   |
@@ -15,4 +16,9 @@ PYI046.pyi:9:7: PYI046 Private protocol `_Bar` is never used
 10 |     bar: int
    |
 
-
+PYI046.pyi:16:7: PYI046 Private protocol `_Baz` is never used
+   |
+16 | class _Baz(Protocol[_T]):
+   |       ^^^^ PYI046
+17 |     x: _T
+   |

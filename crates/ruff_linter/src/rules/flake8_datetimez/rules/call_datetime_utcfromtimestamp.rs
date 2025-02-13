@@ -2,7 +2,8 @@ use ruff_python_ast::Expr;
 use ruff_text_size::TextRange;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_semantic::Modules;
 
 use crate::checkers::ast::Checker;
 
@@ -18,15 +19,15 @@ use super::helpers;
 /// datetime objects. Since this can lead to errors, it is recommended to
 /// always use timezone-aware objects.
 ///
-/// `datetime.datetime.utcfromtimestamp()` returns a naive datetime object;
-/// instead, use `datetime.datetime.fromtimestamp(ts, tz=)` to return a
-/// timezone-aware object.
+/// `datetime.datetime.utcfromtimestamp()` returns a naive datetime
+/// object; instead, use `datetime.datetime.fromtimestamp(ts, tz=...)`
+/// to create a timezone-aware object.
 ///
 /// ## Example
 /// ```python
 /// import datetime
 ///
-/// datetime.datetime.utcfromtimestamp()
+/// datetime.datetime.utcfromtimestamp(946684800)
 /// ```
 ///
 /// Use instead:
@@ -36,7 +37,7 @@ use super::helpers;
 /// datetime.datetime.fromtimestamp(946684800, tz=datetime.timezone.utc)
 /// ```
 ///
-/// Or, for Python 3.11 and later:
+/// Or, on Python 3.11 and later:
 /// ```python
 /// import datetime
 ///
@@ -45,30 +46,31 @@ use super::helpers;
 ///
 /// ## References
 /// - [Python documentation: Aware and Naive Objects](https://docs.python.org/3/library/datetime.html#aware-and-naive-objects)
-#[violation]
-pub struct CallDatetimeUtcfromtimestamp;
+#[derive(ViolationMetadata)]
+pub(crate) struct CallDatetimeUtcfromtimestamp;
 
 impl Violation for CallDatetimeUtcfromtimestamp {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(
-            "The use of `datetime.datetime.utcfromtimestamp()` is not allowed, use \
-             `datetime.datetime.fromtimestamp(ts, tz=)` instead"
-        )
+        "`datetime.datetime.utcfromtimestamp()` used".to_string()
+    }
+
+    fn fix_title(&self) -> Option<String> {
+        Some("Use `datetime.datetime.fromtimestamp(ts, tz=...)` instead".to_string())
     }
 }
 
-pub(crate) fn call_datetime_utcfromtimestamp(
-    checker: &mut Checker,
-    func: &Expr,
-    location: TextRange,
-) {
+pub(crate) fn call_datetime_utcfromtimestamp(checker: &Checker, func: &Expr, location: TextRange) {
+    if !checker.semantic().seen_module(Modules::DATETIME) {
+        return;
+    }
+
     if !checker
         .semantic()
-        .resolve_call_path(func)
-        .is_some_and(|call_path| {
+        .resolve_qualified_name(func)
+        .is_some_and(|qualified_name| {
             matches!(
-                call_path.as_slice(),
+                qualified_name.segments(),
                 ["datetime", "datetime", "utcfromtimestamp"]
             )
         })
@@ -76,11 +78,9 @@ pub(crate) fn call_datetime_utcfromtimestamp(
         return;
     }
 
-    if helpers::parent_expr_is_astimezone(checker) {
+    if helpers::followed_by_astimezone(checker) {
         return;
     }
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(CallDatetimeUtcfromtimestamp, location));
+    checker.report_diagnostic(Diagnostic::new(CallDatetimeUtcfromtimestamp, location));
 }

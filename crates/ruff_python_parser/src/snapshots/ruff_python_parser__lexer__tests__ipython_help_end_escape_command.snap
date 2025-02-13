@@ -1,7 +1,10 @@
 ---
 source: crates/ruff_python_parser/src/lexer.rs
 expression: lex_jupyter_source(source)
+snapshot_kind: text
 ---
+## Tokens
+```
 [
     (
         IpyEscapeCommand {
@@ -180,3 +183,4 @@ expression: lex_jupyter_source(source)
         132..132,
     ),
 ]
+```

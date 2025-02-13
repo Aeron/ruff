@@ -1,10 +1,10 @@
 use std::fmt;
 
-use ruff_python_ast::{self as ast, Arguments, Expr, Stmt};
-
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_semantic::SemanticModel;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::helpers::is_dunder;
+use ruff_python_ast::{self as ast, Expr, Stmt};
+use ruff_python_semantic::{Modules, SemanticModel};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -62,8 +62,8 @@ use super::helpers;
 /// ```
 ///
 /// [Django Style Guide]: https://docs.djangoproject.com/en/dev/internals/contributing/writing-code/coding-style/#model-style
-#[violation]
-pub struct DjangoUnorderedBodyContentInModel {
+#[derive(ViolationMetadata)]
+pub(crate) struct DjangoUnorderedBodyContentInModel {
     element_type: ContentType,
     prev_element_type: ContentType,
 }
@@ -79,87 +79,20 @@ impl Violation for DjangoUnorderedBodyContentInModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
-enum ContentType {
-    FieldDeclaration,
-    ManagerDeclaration,
-    MetaClass,
-    StrMethod,
-    SaveMethod,
-    GetAbsoluteUrlMethod,
-    CustomMethod,
-}
-
-impl fmt::Display for ContentType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ContentType::FieldDeclaration => f.write_str("field declaration"),
-            ContentType::ManagerDeclaration => f.write_str("manager declaration"),
-            ContentType::MetaClass => f.write_str("`Meta` class"),
-            ContentType::StrMethod => f.write_str("`__str__` method"),
-            ContentType::SaveMethod => f.write_str("`save` method"),
-            ContentType::GetAbsoluteUrlMethod => f.write_str("`get_absolute_url` method"),
-            ContentType::CustomMethod => f.write_str("custom method"),
-        }
-    }
-}
-
-fn get_element_type(element: &Stmt, semantic: &SemanticModel) -> Option<ContentType> {
-    match element {
-        Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
-            if let Expr::Call(ast::ExprCall { func, .. }) = value.as_ref() {
-                if helpers::is_model_field(func, semantic) {
-                    return Some(ContentType::FieldDeclaration);
-                }
-            }
-            let Some(expr) = targets.first() else {
-                return None;
-            };
-            let Expr::Name(ast::ExprName { id, .. }) = expr else {
-                return None;
-            };
-            if id == "objects" {
-                Some(ContentType::ManagerDeclaration)
-            } else {
-                None
-            }
-        }
-        Stmt::ClassDef(ast::StmtClassDef { name, .. }) => {
-            if name == "Meta" {
-                Some(ContentType::MetaClass)
-            } else {
-                None
-            }
-        }
-        Stmt::FunctionDef(ast::StmtFunctionDef { name, .. }) => match name.as_str() {
-            "__str__" => Some(ContentType::StrMethod),
-            "save" => Some(ContentType::SaveMethod),
-            "get_absolute_url" => Some(ContentType::GetAbsoluteUrlMethod),
-            _ => Some(ContentType::CustomMethod),
-        },
-        _ => None,
-    }
-}
-
 /// DJ012
-pub(crate) fn unordered_body_content_in_model(
-    checker: &mut Checker,
-    arguments: Option<&Arguments>,
-    body: &[Stmt],
-) {
-    if !arguments.is_some_and(|arguments| {
-        arguments
-            .args
-            .iter()
-            .any(|base| helpers::is_model(base, checker.semantic()))
-    }) {
+pub(crate) fn unordered_body_content_in_model(checker: &Checker, class_def: &ast::StmtClassDef) {
+    if !checker.semantic().seen_module(Modules::DJANGO) {
+        return;
+    }
+
+    if !helpers::is_model(class_def, checker.semantic()) {
         return;
     }
 
     // Track all the element types we've seen so far.
     let mut element_types = Vec::new();
     let mut prev_element_type = None;
-    for element in body {
+    for element in &class_def.body {
         let Some(element_type) = get_element_type(element, checker.semantic()) else {
             continue;
         };
@@ -184,9 +117,69 @@ pub(crate) fn unordered_body_content_in_model(
                 },
                 element.range(),
             );
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         } else {
             element_types.push(element_type);
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+enum ContentType {
+    FieldDeclaration,
+    ManagerDeclaration,
+    MetaClass,
+    MagicMethod,
+    SaveMethod,
+    GetAbsoluteUrlMethod,
+    CustomMethod,
+}
+
+impl fmt::Display for ContentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContentType::FieldDeclaration => f.write_str("field declaration"),
+            ContentType::ManagerDeclaration => f.write_str("manager declaration"),
+            ContentType::MetaClass => f.write_str("`Meta` class"),
+            ContentType::MagicMethod => f.write_str("Magic method"),
+            ContentType::SaveMethod => f.write_str("`save` method"),
+            ContentType::GetAbsoluteUrlMethod => f.write_str("`get_absolute_url` method"),
+            ContentType::CustomMethod => f.write_str("custom method"),
+        }
+    }
+}
+
+fn get_element_type(element: &Stmt, semantic: &SemanticModel) -> Option<ContentType> {
+    match element {
+        Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
+            if let Expr::Call(ast::ExprCall { func, .. }) = value.as_ref() {
+                if helpers::is_model_field(func, semantic) {
+                    return Some(ContentType::FieldDeclaration);
+                }
+            }
+            let expr = targets.first()?;
+            let Expr::Name(ast::ExprName { id, .. }) = expr else {
+                return None;
+            };
+            if id == "objects" {
+                Some(ContentType::ManagerDeclaration)
+            } else {
+                None
+            }
+        }
+        Stmt::ClassDef(ast::StmtClassDef { name, .. }) => {
+            if name == "Meta" {
+                Some(ContentType::MetaClass)
+            } else {
+                None
+            }
+        }
+        Stmt::FunctionDef(ast::StmtFunctionDef { name, .. }) => match name.as_str() {
+            name if is_dunder(name) => Some(ContentType::MagicMethod),
+            "save" => Some(ContentType::SaveMethod),
+            "get_absolute_url" => Some(ContentType::GetAbsoluteUrlMethod),
+            _ => Some(ContentType::CustomMethod),
+        },
+        _ => None,
     }
 }

@@ -9,6 +9,7 @@ Example usage:
         --code 807 \
         --linter flake8-pie
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,9 +27,7 @@ def main(*, name: str, prefix: str, code: str, linter: str) -> None:
         / "crates/ruff_linter/resources/test/fixtures"
         / dir_name(linter)
         / f"{filestem}.py"
-    ).open(
-        "a",
-    ):
+    ).open("a"):
         pass
 
     plugin_module = ROOT_DIR / "crates/ruff_linter/src/rules" / dir_name(linter)
@@ -94,7 +93,7 @@ def main(*, name: str, prefix: str, code: str, linter: str) -> None:
         fp.write(
             f"""\
 use ruff_diagnostics::Violation;
-use ruff_macros::{{derive_message_formats, violation}};
+use ruff_macros::{{derive_message_formats, ViolationMetadata}};
 
 use crate::checkers::ast::Checker;
 
@@ -109,8 +108,8 @@ use crate::checkers::ast::Checker;
 /// Use instead:
 /// ```python
 /// ```
-#[violation]
-pub struct {name};
+#[derive(ViolationMetadata)]
+pub(crate) struct {name};
 
 impl Violation for {name} {{
     #[derive_message_formats]
@@ -138,9 +137,10 @@ pub(crate) fn {rule_name_snake}(checker: &mut Checker) {{}}
             lines.append(line)
 
         variant = pascal_case(linter)
-        rule = f"""rules::{linter.split(" ")[0]}::rules::{name}"""
+        linter_name = linter.split(" ")[0].replace("-", "_")
+        rule = f"""rules::{linter_name}::rules::{name}"""
         lines.append(
-            " " * 8 + f"""({variant}, "{code}") => (RuleGroup::Stable, {rule}),\n""",
+            " " * 8 + f"""({variant}, "{code}") => (RuleGroup::Preview, {rule}),\n""",
         )
         lines.sort()
         text += "".join(lines)

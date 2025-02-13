@@ -1,7 +1,8 @@
-use ruff_python_ast::{self as ast, Expr};
+use ruff_python_ast::{self as ast, Expr, StringLike};
+use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 use crate::checkers::ast::Checker;
 
@@ -30,12 +31,16 @@ use crate::checkers::ast::Checker;
 ///     ...
 /// ```
 ///
+/// ## Options
+/// - `lint.flake8-bandit.hardcoded-tmp-directory`
+/// - `lint.flake8-bandit.hardcoded-tmp-directory-extend`
+///
 /// ## References
 /// - [Common Weakness Enumeration: CWE-377](https://cwe.mitre.org/data/definitions/377.html)
 /// - [Common Weakness Enumeration: CWE-379](https://cwe.mitre.org/data/definitions/379.html)
 /// - [Python documentation: `tempfile`](https://docs.python.org/3/library/tempfile.html)
-#[violation]
-pub struct HardcodedTempFile {
+#[derive(ViolationMetadata)]
+pub(crate) struct HardcodedTempFile {
     string: String,
 }
 
@@ -51,13 +56,36 @@ impl Violation for HardcodedTempFile {
 }
 
 /// S108
-pub(crate) fn hardcoded_tmp_directory(checker: &mut Checker, string: &ast::ExprStringLiteral) {
+pub(crate) fn hardcoded_tmp_directory(checker: &Checker, string: StringLike) {
+    match string {
+        StringLike::String(ast::ExprStringLiteral { value, .. }) => {
+            check(checker, value.to_str(), string.range());
+        }
+        StringLike::FString(ast::ExprFString { value, .. }) => {
+            for part in value {
+                match part {
+                    ast::FStringPart::Literal(literal) => {
+                        check(checker, literal, literal.range());
+                    }
+                    ast::FStringPart::FString(f_string) => {
+                        for literal in f_string.elements.literals() {
+                            check(checker, literal, literal.range());
+                        }
+                    }
+                }
+            }
+        }
+        StringLike::Bytes(_) => (),
+    }
+}
+
+fn check(checker: &Checker, value: &str, range: TextRange) {
     if !checker
         .settings
         .flake8_bandit
         .hardcoded_tmp_directory
         .iter()
-        .any(|prefix| string.value.starts_with(prefix))
+        .any(|prefix| value.starts_with(prefix))
     {
         return;
     }
@@ -67,17 +95,17 @@ pub(crate) fn hardcoded_tmp_directory(checker: &mut Checker, string: &ast::ExprS
     {
         if checker
             .semantic()
-            .resolve_call_path(func)
-            .is_some_and(|call_path| matches!(call_path.as_slice(), ["tempfile", ..]))
+            .resolve_qualified_name(func)
+            .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["tempfile", ..]))
         {
             return;
         }
     }
 
-    checker.diagnostics.push(Diagnostic::new(
+    checker.report_diagnostic(Diagnostic::new(
         HardcodedTempFile {
-            string: string.value.clone(),
+            string: value.to_string(),
         },
-        string.range,
+        range,
     ));
 }

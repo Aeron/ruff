@@ -4,14 +4,18 @@ use anyhow::Result;
 use rustc_hash::FxHashMap;
 
 use ruff_diagnostics::{Diagnostic, DiagnosticKind, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_semantic::{AnyImport, Binding, Imported, NodeId, ResolvedReferenceId, Scope};
-use ruff_text_size::{Ranged, TextRange};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_semantic::{Binding, Imported, NodeId, Scope};
+use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 use crate::codes::Rule;
 use crate::fix;
 use crate::importer::ImportedMembers;
+use crate::rules::flake8_type_checking::helpers::{
+    filter_contained, is_typing_reference, quote_annotation,
+};
+use crate::rules::flake8_type_checking::imports::ImportBinding;
 use crate::rules::isort::{categorize, ImportSection, ImportType};
 
 /// ## What it does
@@ -24,10 +28,14 @@ use crate::rules::isort::{categorize, ImportSection, ImportType};
 /// instead be imported conditionally under an `if TYPE_CHECKING:` block to
 /// minimize runtime overhead.
 ///
+/// If [`lint.flake8-type-checking.quote-annotations`] is set to `true`,
+/// annotations will be wrapped in quotes if doing so would enable the
+/// corresponding import to be moved into an `if TYPE_CHECKING:` block.
+///
 /// If a class _requires_ that type annotations be available at runtime (as is
 /// the case for Pydantic, SQLAlchemy, and other libraries), consider using
-/// the [`flake8-type-checking.runtime-evaluated-base-classes`] and
-/// [`flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
+/// the [`lint.flake8-type-checking.runtime-evaluated-base-classes`] and
+/// [`lint.flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
 /// as such.
 ///
 /// ## Example
@@ -56,13 +64,16 @@ use crate::rules::isort::{categorize, ImportSection, ImportType};
 /// ```
 ///
 /// ## Options
-/// - `flake8-type-checking.runtime-evaluated-base-classes`
-/// - `flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.quote-annotations`
+/// - `lint.flake8-type-checking.runtime-evaluated-base-classes`
+/// - `lint.flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.strict`
+/// - `lint.typing-modules`
 ///
 /// ## References
-/// - [PEP 536](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
-#[violation]
-pub struct TypingOnlyFirstPartyImport {
+/// - [PEP 563: Runtime annotation resolution and `TYPE_CHECKING`](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
+#[derive(ViolationMetadata)]
+pub(crate) struct TypingOnlyFirstPartyImport {
     qualified_name: String,
 }
 
@@ -92,10 +103,14 @@ impl Violation for TypingOnlyFirstPartyImport {
 /// instead be imported conditionally under an `if TYPE_CHECKING:` block to
 /// minimize runtime overhead.
 ///
+/// If [`lint.flake8-type-checking.quote-annotations`] is set to `true`,
+/// annotations will be wrapped in quotes if doing so would enable the
+/// corresponding import to be moved into an `if TYPE_CHECKING:` block.
+///
 /// If a class _requires_ that type annotations be available at runtime (as is
 /// the case for Pydantic, SQLAlchemy, and other libraries), consider using
-/// the [`flake8-type-checking.runtime-evaluated-base-classes`] and
-/// [`flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
+/// the [`lint.flake8-type-checking.runtime-evaluated-base-classes`] and
+/// [`lint.flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
 /// as such.
 ///
 /// ## Example
@@ -124,13 +139,16 @@ impl Violation for TypingOnlyFirstPartyImport {
 /// ```
 ///
 /// ## Options
-/// - `flake8-type-checking.runtime-evaluated-base-classes`
-/// - `flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.quote-annotations`
+/// - `lint.flake8-type-checking.runtime-evaluated-base-classes`
+/// - `lint.flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.strict`
+/// - `lint.typing-modules`
 ///
 /// ## References
-/// - [PEP 536](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
-#[violation]
-pub struct TypingOnlyThirdPartyImport {
+/// - [PEP 563: Runtime annotation resolution and `TYPE_CHECKING`](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
+#[derive(ViolationMetadata)]
+pub(crate) struct TypingOnlyThirdPartyImport {
     qualified_name: String,
 }
 
@@ -160,10 +178,14 @@ impl Violation for TypingOnlyThirdPartyImport {
 /// instead be imported conditionally under an `if TYPE_CHECKING:` block to
 /// minimize runtime overhead.
 ///
+/// If [`lint.flake8-type-checking.quote-annotations`] is set to `true`,
+/// annotations will be wrapped in quotes if doing so would enable the
+/// corresponding import to be moved into an `if TYPE_CHECKING:` block.
+///
 /// If a class _requires_ that type annotations be available at runtime (as is
 /// the case for Pydantic, SQLAlchemy, and other libraries), consider using
-/// the [`flake8-type-checking.runtime-evaluated-base-classes`] and
-/// [`flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
+/// the [`lint.flake8-type-checking.runtime-evaluated-base-classes`] and
+/// [`lint.flake8-type-checking.runtime-evaluated-decorators`] settings to mark them
 /// as such.
 ///
 /// ## Example
@@ -192,13 +214,16 @@ impl Violation for TypingOnlyThirdPartyImport {
 /// ```
 ///
 /// ## Options
-/// - `flake8-type-checking.runtime-evaluated-base-classes`
-/// - `flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.quote-annotations`
+/// - `lint.flake8-type-checking.runtime-evaluated-base-classes`
+/// - `lint.flake8-type-checking.runtime-evaluated-decorators`
+/// - `lint.flake8-type-checking.strict`
+/// - `lint.typing-modules`
 ///
 /// ## References
-/// - [PEP 536](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
-#[violation]
-pub struct TypingOnlyStandardLibraryImport {
+/// - [PEP 563: Runtime annotation resolution and `TYPE_CHECKING`](https://peps.python.org/pep-0563/#runtime-annotation-resolution-and-type-checking)
+#[derive(ViolationMetadata)]
+pub(crate) struct TypingOnlyStandardLibraryImport {
     qualified_name: String,
 }
 
@@ -218,12 +243,11 @@ impl Violation for TypingOnlyStandardLibraryImport {
     }
 }
 
-/// TCH001, TCH002, TCH003
+/// TC001, TC002, TC003
 pub(crate) fn typing_only_runtime_import(
     checker: &Checker,
     scope: &Scope,
     runtime_imports: &[&Binding],
-    diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Collect all typing-only imports by statement and import type.
     let mut errors_by_statement: FxHashMap<(NodeId, ImportType), Vec<ImportBinding>> =
@@ -253,18 +277,17 @@ pub(crate) fn typing_only_runtime_import(
         };
 
         if binding.context.is_runtime()
-            && binding.references().all(|reference_id| {
-                checker
-                    .semantic()
-                    .reference(reference_id)
-                    .context()
-                    .is_typing()
-            })
+            && binding
+                .references()
+                .map(|reference_id| checker.semantic().reference(reference_id))
+                .all(|reference| {
+                    is_typing_reference(reference, &checker.settings.flake8_type_checking)
+                })
         {
             let qualified_name = import.qualified_name();
 
             if is_exempt(
-                qualified_name.as_str(),
+                &qualified_name.to_string(),
                 &checker
                     .settings
                     .flake8_type_checking
@@ -278,14 +301,16 @@ pub(crate) fn typing_only_runtime_import(
 
             // Categorize the import, using coarse-grained categorization.
             let import_type = match categorize(
-                qualified_name.as_str(),
-                None,
+                &qualified_name.to_string(),
+                qualified_name.is_unresolved_import(),
                 &checker.settings.src,
                 checker.package(),
                 checker.settings.isort.detect_same_package,
                 &checker.settings.isort.known_modules,
                 checker.settings.target_version,
                 checker.settings.isort.no_sections,
+                &checker.settings.isort.section_order,
+                &checker.settings.isort.default_section,
             ) {
                 ImportSection::Known(ImportType::LocalFolder | ImportType::FirstParty) => {
                     ImportType::FirstParty
@@ -310,6 +335,7 @@ pub(crate) fn typing_only_runtime_import(
             let import = ImportBinding {
                 import,
                 reference_id,
+                binding,
                 range: binding.range(),
                 parent_range: binding.parent_range(checker.semantic()),
             };
@@ -344,15 +370,17 @@ pub(crate) fn typing_only_runtime_import(
             ..
         } in imports
         {
-            let mut diagnostic =
-                Diagnostic::new(diagnostic_for(import_type, import.qualified_name()), range);
+            let mut diagnostic = Diagnostic::new(
+                diagnostic_for(import_type, import.qualified_name().to_string()),
+                range,
+            );
             if let Some(range) = parent_range {
                 diagnostic.set_parent(range.start());
             }
             if let Some(fix) = fix.as_ref() {
                 diagnostic.set_fix(fix.clone());
             }
-            diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 
@@ -366,31 +394,15 @@ pub(crate) fn typing_only_runtime_import(
             ..
         } in imports
         {
-            let mut diagnostic =
-                Diagnostic::new(diagnostic_for(import_type, import.qualified_name()), range);
+            let mut diagnostic = Diagnostic::new(
+                diagnostic_for(import_type, import.qualified_name().to_string()),
+                range,
+            );
             if let Some(range) = parent_range {
                 diagnostic.set_parent(range.start());
             }
-            diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
-    }
-}
-
-/// A runtime-required import with its surrounding context.
-struct ImportBinding<'a> {
-    /// The qualified name of the import (e.g., `typing.List` for `from typing import List`).
-    import: AnyImport<'a>,
-    /// The first reference to the imported symbol.
-    reference_id: ResolvedReferenceId,
-    /// The trimmed range of the import (e.g., `List` in `from typing import List`).
-    range: TextRange,
-    /// The range of the import's parent statement.
-    parent_range: Option<TextRange>,
-}
-
-impl Ranged for ImportBinding<'_> {
-    fn range(&self) -> TextRange {
-        self.range
     }
 }
 
@@ -472,19 +484,49 @@ fn fix_imports(checker: &Checker, node_id: NodeId, imports: &[ImportBinding]) ->
     )?;
 
     // Step 2) Add the import to a `TYPE_CHECKING` block.
-    let add_import_edit = checker.importer().typing_import_edit(
-        &ImportedMembers {
-            statement,
-            names: member_names.iter().map(AsRef::as_ref).collect(),
-        },
-        at,
-        checker.semantic(),
-        checker.source_type,
-    )?;
+    let (type_checking_edit, add_import_edit) = checker
+        .importer()
+        .typing_import_edit(
+            &ImportedMembers {
+                statement,
+                names: member_names.iter().map(AsRef::as_ref).collect(),
+            },
+            at,
+            checker.semantic(),
+        )?
+        .into_edits();
 
-    Ok(
-        Fix::unsafe_edits(remove_import_edit, add_import_edit.into_edits()).isolate(
-            Checker::isolation(checker.semantic().parent_statement_id(node_id)),
-        ),
+    // Step 3) Quote any runtime usages of the referenced symbol.
+    let quote_reference_edits = filter_contained(
+        imports
+            .iter()
+            .flat_map(|ImportBinding { binding, .. }| {
+                binding.references.iter().filter_map(|reference_id| {
+                    let reference = checker.semantic().reference(*reference_id);
+                    if reference.in_runtime_context() {
+                        Some(quote_annotation(
+                            reference.expression_id()?,
+                            checker.semantic(),
+                            checker.stylist(),
+                            checker.locator(),
+                            checker.default_string_flags(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    Ok(Fix::unsafe_edits(
+        type_checking_edit,
+        add_import_edit
+            .into_iter()
+            .chain(std::iter::once(remove_import_edit))
+            .chain(quote_reference_edits),
     )
+    .isolate(Checker::isolation(
+        checker.semantic().parent_statement_id(node_id),
+    )))
 }

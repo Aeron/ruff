@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr, ExprAttribute, ExprCall};
 use ruff_text_size::{Ranged, TextRange};
 
@@ -19,7 +19,7 @@ use crate::checkers::ast::Checker;
 /// from cryptography.hazmat.primitives.asymmetric import dsa, ec
 ///
 /// dsa.generate_private_key(key_size=512)
-/// ec.generate_private_key(curve=ec.SECT163K1)
+/// ec.generate_private_key(curve=ec.SECT163K1())
 /// ```
 ///
 /// Use instead:
@@ -27,13 +27,13 @@ use crate::checkers::ast::Checker;
 /// from cryptography.hazmat.primitives.asymmetric import dsa, ec
 ///
 /// dsa.generate_private_key(key_size=4096)
-/// ec.generate_private_key(curve=ec.SECP384R1)
+/// ec.generate_private_key(curve=ec.SECP384R1())
 /// ```
 ///
 /// ## References
 /// - [CSRC: Transitioning the Use of Cryptographic Algorithms and Key Lengths](https://csrc.nist.gov/pubs/sp/800/131/a/r2/final)
-#[violation]
-pub struct WeakCryptographicKey {
+#[derive(ViolationMetadata)]
+pub(crate) struct WeakCryptographicKey {
     cryptographic_key: CryptographicKey,
 }
 
@@ -49,13 +49,13 @@ impl Violation for WeakCryptographicKey {
 }
 
 /// S505
-pub(crate) fn weak_cryptographic_key(checker: &mut Checker, call: &ExprCall) {
+pub(crate) fn weak_cryptographic_key(checker: &Checker, call: &ExprCall) {
     let Some((cryptographic_key, range)) = extract_cryptographic_key(checker, call) else {
         return;
     };
 
     if cryptographic_key.is_vulnerable() {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             WeakCryptographicKey { cryptographic_key },
             range,
         ));
@@ -98,11 +98,11 @@ impl Display for CryptographicKey {
 }
 
 fn extract_cryptographic_key(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ExprCall,
 ) -> Option<(CryptographicKey, TextRange)> {
-    let call_path = checker.semantic().resolve_call_path(&call.func)?;
-    match call_path.as_slice() {
+    let qualified_name = checker.semantic().resolve_qualified_name(&call.func)?;
+    match qualified_name.segments() {
         ["cryptography", "hazmat", "primitives", "asymmetric", function, "generate_private_key"] => {
             match *function {
                 "dsa" => {
@@ -114,11 +114,11 @@ fn extract_cryptographic_key(
                     Some((CryptographicKey::Rsa { key_size }, range))
                 }
                 "ec" => {
-                    let argument = call.arguments.find_argument("curve", 0)?;
+                    let argument = call.arguments.find_argument_value("curve", 0)?;
                     let ExprAttribute { attr, value, .. } = argument.as_attribute_expr()?;
-                    let call_path = checker.semantic().resolve_call_path(value)?;
+                    let qualified_name = checker.semantic().resolve_qualified_name(value)?;
                     if matches!(
-                        call_path.as_slice(),
+                        qualified_name.segments(),
                         ["cryptography", "hazmat", "primitives", "asymmetric", "ec"]
                     ) {
                         Some((
@@ -150,7 +150,7 @@ fn extract_cryptographic_key(
 }
 
 fn extract_int_argument(call: &ExprCall, name: &str, position: usize) -> Option<(u16, TextRange)> {
-    let argument = call.arguments.find_argument(name, position)?;
+    let argument = call.arguments.find_argument_value(name, position)?;
     let Expr::NumberLiteral(ast::ExprNumberLiteral {
         value: ast::Number::Int(i),
         ..
