@@ -1,4 +1,4 @@
-[(ii)]
+[(welcome)]
 dev = "run --package ruff_dev --bin ruff_dev"
 benchmark = "bench -p ruff_benchmark --bench linter --bench formatter --"
 
