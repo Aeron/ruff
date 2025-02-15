@@ -1,7 +1,5 @@
 name: C:
-
 permissions: {}
-
 on:
   push:
     branches: [main]
