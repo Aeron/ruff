@@ -1,0 +1,15 @@
+curl -X POST "https://models.inference.ai.azure.com/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -d '{
+        "messages": [
+            {
+                "role": "user",
+                "content": "Can you explain the basics of machine learning?"
+            }
+        ],
+        "model": "Meta-Llama-3-70B-Instruct",
+        "temperature": 0.8,
+        "max_tokens": 2048,
+        "top_p": 0.1
+    }'
