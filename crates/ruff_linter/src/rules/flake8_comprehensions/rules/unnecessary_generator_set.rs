@@ -1,16 +1,16 @@
-use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_macros::{ViolationMetadata, derive_message_formats};
 use ruff_python_ast as ast;
+use ruff_python_ast::ExprGenerator;
 use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::parenthesize::parenthesized_range;
-use ruff_python_ast::ExprGenerator;
-use ruff_python_trivia::{SimpleTokenKind, SimpleTokenizer};
+use ruff_python_parser::TokenKind;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::checkers::ast::Checker;
 use crate::rules::flake8_comprehensions::fixes::{pad_end, pad_start};
+use crate::{AlwaysFixableViolation, Edit, Fix};
 
-use super::helpers;
+use crate::rules::flake8_comprehensions::helpers;
 
 /// ## What it does
 /// Checks for unnecessary generators that can be rewritten as set
@@ -25,7 +25,7 @@ use super::helpers;
 /// `set(x for x in foo)`, it's better to use `set(foo)` directly, since it's
 /// even more direct.
 ///
-/// ## Examples
+/// ## Example
 /// ```python
 /// set(f(x) for x in foo)
 /// set(x for x in foo)
@@ -94,7 +94,7 @@ pub(crate) fn unnecessary_generator_set(checker: &Checker, call: &ast::ExprCall)
     if let [generator] = generators.as_slice() {
         if generator.ifs.is_empty() && !generator.is_async {
             if ComparableExpr::from(elt) == ComparableExpr::from(&generator.target) {
-                let mut diagnostic = Diagnostic::new(
+                let mut diagnostic = checker.report_diagnostic(
                     UnnecessaryGeneratorSet {
                         short_circuit: true,
                     },
@@ -105,14 +105,13 @@ pub(crate) fn unnecessary_generator_set(checker: &Checker, call: &ast::ExprCall)
                     iterator,
                     call.range(),
                 )));
-                checker.report_diagnostic(diagnostic);
                 return;
             }
         }
     }
 
     // Convert `set(f(x) for x in y)` to `{f(x) for x in y}`.
-    let diagnostic = Diagnostic::new(
+    let mut diagnostic = checker.report_diagnostic(
         UnnecessaryGeneratorSet {
             short_circuit: false,
         },
@@ -128,11 +127,13 @@ pub(crate) fn unnecessary_generator_set(checker: &Checker, call: &ast::ExprCall)
 
         // Replace `)` with `}`.
         // Place `}` at argument's end or at trailing comma if present
-        let mut tokenizer =
-            SimpleTokenizer::new(checker.source(), TextRange::new(argument.end(), call.end()));
-        let right_brace_loc = tokenizer
-            .find(|token| token.kind == SimpleTokenKind::Comma)
-            .map_or(call.arguments.end(), |comma| comma.end())
+        let after_arg_tokens = checker
+            .tokens()
+            .in_range(TextRange::new(argument.end(), call.end()));
+        let right_brace_loc = after_arg_tokens
+            .iter()
+            .find(|token| token.kind() == TokenKind::Comma)
+            .map_or(call.arguments.end(), Ranged::end)
             - TextSize::from(1);
         let call_end = Edit::replacement(
             pad_end("}", call.range(), checker.locator(), checker.semantic()),
@@ -163,5 +164,5 @@ pub(crate) fn unnecessary_generator_set(checker: &Checker, call: &ast::ExprCall)
             Fix::unsafe_edits(call_start, [call_end])
         }
     };
-    checker.report_diagnostic(diagnostic.with_fix(fix));
+    diagnostic.set_fix(fix);
 }

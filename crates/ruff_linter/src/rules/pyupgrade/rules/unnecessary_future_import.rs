@@ -1,12 +1,15 @@
-use itertools::Itertools;
-use ruff_python_ast::{Alias, Stmt};
+use std::collections::BTreeSet;
 
-use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Fix};
-use ruff_macros::{derive_message_formats, ViolationMetadata};
+use itertools::Itertools;
+
+use ruff_macros::{ViolationMetadata, derive_message_formats};
+use ruff_python_ast::{self as ast, Alias, Stmt, StmtRef};
+use ruff_python_semantic::NameImport;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 use crate::fix;
+use crate::{AlwaysFixableViolation, Applicability, Fix};
 
 /// ## What it does
 /// Checks for unnecessary `__future__` imports.
@@ -29,6 +32,9 @@ use crate::fix;
 /// ```python
 /// print("Hello, world!")
 /// ```
+///
+/// ## Fix safety
+/// This fix is marked unsafe if applying it would delete a comment.
 ///
 /// ## Options
 /// - `target-version`
@@ -81,6 +87,29 @@ const PY37_PLUS_REMOVE_FUTURES: &[&str] = &[
     "generator_stop",
 ];
 
+pub(crate) type RequiredImports = BTreeSet<NameImport>;
+
+pub(crate) fn is_import_required_by_isort(
+    required_imports: &RequiredImports,
+    stmt: StmtRef,
+    alias: &Alias,
+) -> bool {
+    let segments: &[&str] = match stmt {
+        StmtRef::ImportFrom(ast::StmtImportFrom {
+            module: Some(module),
+            ..
+        }) => &[module.as_str(), alias.name.as_str()],
+        StmtRef::ImportFrom(ast::StmtImportFrom { module: None, .. }) | StmtRef::Import(_) => {
+            &[alias.name.as_str()]
+        }
+        _ => return false,
+    };
+
+    required_imports
+        .iter()
+        .any(|required_import| required_import.qualified_name().segments() == segments)
+}
+
 /// UP010
 pub(crate) fn unnecessary_future_import(checker: &Checker, stmt: &Stmt, names: &[Alias]) {
     let mut unused_imports: Vec<&Alias> = vec![];
@@ -88,6 +117,15 @@ pub(crate) fn unnecessary_future_import(checker: &Checker, stmt: &Stmt, names: &
         if alias.asname.is_some() {
             continue;
         }
+
+        if is_import_required_by_isort(
+            &checker.settings().isort.required_imports,
+            stmt.into(),
+            alias,
+        ) {
+            continue;
+        }
+
         if PY33_PLUS_REMOVE_FUTURES.contains(&alias.name.as_str())
             || PY37_PLUS_REMOVE_FUTURES.contains(&alias.name.as_str())
         {
@@ -98,7 +136,7 @@ pub(crate) fn unnecessary_future_import(checker: &Checker, stmt: &Stmt, names: &
     if unused_imports.is_empty() {
         return;
     }
-    let mut diagnostic = Diagnostic::new(
+    let mut diagnostic = checker.report_diagnostic(
         UnnecessaryFutureImport {
             names: unused_imports
                 .iter()
@@ -116,16 +154,25 @@ pub(crate) fn unnecessary_future_import(checker: &Checker, stmt: &Stmt, names: &
             unused_imports
                 .iter()
                 .map(|alias| &alias.name)
-                .map(ruff_python_ast::Identifier::as_str),
+                .map(ast::Identifier::as_str),
             statement,
             parent,
             checker.locator(),
             checker.stylist(),
             checker.indexer(),
         )?;
-        Ok(Fix::safe_edit(edit).isolate(Checker::isolation(
-            checker.semantic().current_statement_parent_id(),
-        )))
+
+        let range = edit.range();
+        let applicability = if checker.comment_ranges().intersects(range) {
+            Applicability::Unsafe
+        } else {
+            Applicability::Safe
+        };
+
+        Ok(
+            Fix::applicable_edit(edit, applicability).isolate(Checker::isolation(
+                checker.semantic().current_statement_parent_id(),
+            )),
+        )
     });
-    checker.report_diagnostic(diagnostic);
 }

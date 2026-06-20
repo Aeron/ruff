@@ -1,14 +1,15 @@
 use std::cmp::Ordering;
 
-use ruff_diagnostics::{Applicability, Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_macros::{ViolationMetadata, derive_message_formats};
+use ruff_python_ast::StringFlags;
 use ruff_python_ast::{
-    str::TripleQuotes, Expr, ExprCall, ExprContext, ExprList, ExprUnaryOp, StringLiteral,
-    StringLiteralFlags, StringLiteralValue, UnaryOp,
+    Expr, ExprCall, ExprContext, ExprList, ExprUnaryOp, StringLiteral, StringLiteralFlags,
+    StringLiteralValue, UnaryOp, str::TripleQuotes,
 };
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
+use crate::{Applicability, Edit, Fix, FixAvailability, Violation};
 
 /// ## What it does
 /// Checks for static `str.split` calls that can be replaced with list literals.
@@ -38,6 +39,8 @@ use crate::checkers::ast::Checker;
 ///     "b"  # comment
 /// ).split(",")
 /// ```
+///
+/// as this is converted to `["a", "b"]` without any of the comments.
 ///
 /// ## References
 /// - [Python documentation: `str.split`](https://docs.python.org/3/library/stdtypes.html#str.split)
@@ -81,7 +84,7 @@ pub(crate) fn split_static_string(
     let sep_arg = arguments.find_argument_value("sep", 0);
     let split_replacement = if let Some(sep) = sep_arg {
         match sep {
-            Expr::NoneLiteral(_) => split_default(str_value, maxsplit_value),
+            Expr::NoneLiteral(_) => split_default(str_value, maxsplit_value, direction),
             Expr::StringLiteral(sep_value) => {
                 let sep_value_str = sep_value.value.to_str();
                 Some(split_sep(
@@ -97,10 +100,10 @@ pub(crate) fn split_static_string(
             }
         }
     } else {
-        split_default(str_value, maxsplit_value)
+        split_default(str_value, maxsplit_value, direction)
     };
 
-    let mut diagnostic = Diagnostic::new(SplitStaticString, call.range());
+    let mut diagnostic = checker.report_diagnostic(SplitStaticString, call.range());
     if let Some(ref replacement_expr) = split_replacement {
         diagnostic.set_fix(Fix::applicable_edit(
             Edit::range_replacement(checker.generator().expr(replacement_expr), call.range()),
@@ -112,7 +115,39 @@ pub(crate) fn split_static_string(
             },
         ));
     }
-    checker.report_diagnostic(diagnostic);
+}
+
+fn replace_flags(elt: &str, flags: StringLiteralFlags) -> StringLiteralFlags {
+    // In the ideal case we can wrap the element in _single_ quotes of the same
+    // style. For example, both of these are okay:
+    //
+    // ```python
+    // """itemA
+    // itemB
+    // itemC""".split() # -> ["itemA", "itemB", "itemC"]
+    // ```
+    //
+    // ```python
+    // r"""itemA
+    // 'single'quoted
+    // """.split() # -> [r"itemA",r"'single'quoted'"]
+    // ```
+    if !flags.prefix().is_raw() || !elt.contains(flags.quote_style().as_char()) {
+        flags.with_triple_quotes(TripleQuotes::No)
+    }
+    // If we have a raw string containing a quotation mark of the same style,
+    // then we have to swap the style of quotation marks used
+    else if !elt.contains(flags.quote_style().opposite().as_char()) {
+        flags
+            .with_quote_style(flags.quote_style().opposite())
+            .with_triple_quotes(TripleQuotes::No)
+    } else
+    // If both types of quotes are used in the raw, triple-quoted string, then
+    // we are forced to either add escapes or keep the triple quotes. We opt for
+    // the latter.
+    {
+        flags
+    }
 }
 
 fn construct_replacement(elts: &[&str], flags: StringLiteralFlags) -> Expr {
@@ -120,29 +155,26 @@ fn construct_replacement(elts: &[&str], flags: StringLiteralFlags) -> Expr {
         elts: elts
             .iter()
             .map(|elt| {
+                let element_flags = replace_flags(elt, flags);
                 Expr::from(StringLiteral {
                     value: Box::from(*elt),
                     range: TextRange::default(),
-                    // intentionally omit the triple quote flag, if set, to avoid strange
-                    // replacements like
-                    //
-                    // ```python
-                    // """
-                    // itemA
-                    // itemB
-                    // itemC
-                    // """.split() # -> ["""itemA""", """itemB""", """itemC"""]
-                    // ```
-                    flags: flags.with_triple_quotes(TripleQuotes::No),
+                    node_index: ruff_python_ast::AtomicNodeIndex::dummy(),
+                    flags: element_flags,
                 })
             })
             .collect(),
         ctx: ExprContext::Load,
         range: TextRange::default(),
+        node_index: ruff_python_ast::AtomicNodeIndex::dummy(),
     })
 }
 
-fn split_default(str_value: &StringLiteralValue, max_split: i32) -> Option<Expr> {
+fn split_default(
+    str_value: &StringLiteralValue,
+    max_split: i32,
+    direction: Direction,
+) -> Option<Expr> {
     // From the Python documentation:
     // > If sep is not specified or is None, a different splitting algorithm is applied: runs of
     // > consecutive whitespace are regarded as a single separator, and the result will contain
@@ -150,6 +182,7 @@ fn split_default(str_value: &StringLiteralValue, max_split: i32) -> Option<Expr>
     // > Consequently, splitting an empty string or a string consisting of just whitespace with
     // > a None separator returns [].
     // https://docs.python.org/3/library/stdtypes.html#str.split
+    let string_val = str_value.to_str();
     match max_split.cmp(&0) {
         Ordering::Greater => {
             // Autofix for `maxsplit` without separator not yet implemented, as
@@ -158,12 +191,37 @@ fn split_default(str_value: &StringLiteralValue, max_split: i32) -> Option<Expr>
             None
         }
         Ordering::Equal => {
-            let list_items: Vec<&str> = vec![str_value.to_str()];
-            Some(construct_replacement(&list_items, str_value.flags()))
+            // Behavior for maxsplit = 0 when sep is None:
+            // - If the string is empty or all whitespace, result is [].
+            // - Otherwise:
+            //   - " x ".split(maxsplit=0)  -> ['x ']
+            //   - " x ".rsplit(maxsplit=0) -> [' x']
+            //   - "".split(maxsplit=0) -> []
+            //   - " ".split(maxsplit=0) -> []
+            let processed_str = if direction == Direction::Left {
+                string_val.trim_start_matches(py_unicode_is_whitespace)
+            } else {
+                string_val.trim_end_matches(py_unicode_is_whitespace)
+            };
+            let list_items: &[_] = if processed_str.is_empty() {
+                &[]
+            } else {
+                &[processed_str]
+            };
+            Some(construct_replacement(
+                list_items,
+                str_value.first_literal_flags(),
+            ))
         }
         Ordering::Less => {
-            let list_items: Vec<&str> = str_value.to_str().split_whitespace().collect();
-            Some(construct_replacement(&list_items, str_value.flags()))
+            let list_items: Vec<&str> = string_val
+                .split(py_unicode_is_whitespace)
+                .filter(|s| !s.is_empty())
+                .collect();
+            Some(construct_replacement(
+                &list_items,
+                str_value.first_literal_flags(),
+            ))
         }
     }
 }
@@ -178,16 +236,24 @@ fn split_sep(
     let list_items: Vec<&str> = if let Ok(split_n) = usize::try_from(max_split) {
         match direction {
             Direction::Left => value.splitn(split_n + 1, sep_value).collect(),
-            Direction::Right => value.rsplitn(split_n + 1, sep_value).collect(),
+            Direction::Right => {
+                let mut items: Vec<&str> = value.rsplitn(split_n + 1, sep_value).collect();
+                items.reverse();
+                items
+            }
         }
     } else {
         match direction {
             Direction::Left => value.split(sep_value).collect(),
-            Direction::Right => value.rsplit(sep_value).collect(),
+            Direction::Right => {
+                let mut items: Vec<&str> = value.rsplit(sep_value).collect();
+                items.reverse();
+                items
+            }
         }
     };
 
-    construct_replacement(&list_items, str_value.flags())
+    construct_replacement(&list_items, str_value.first_literal_flags())
 }
 
 /// Returns the value of the `maxsplit` argument as an `i32`, if it is a numeric value.
@@ -228,4 +294,35 @@ fn get_maxsplit_value(arg: Option<&Expr>) -> Option<i32> {
 enum Direction {
     Left,
     Right,
+}
+
+/// Like [`char::is_whitespace`] but with Python's notion of whitespace.
+///
+/// <https://github.com/astral-sh/ruff/issues/19845>
+/// <https://github.com/python/cpython/blob/v3.14.0rc1/Objects/unicodetype_db.h#L6673-L6711>
+#[rustfmt::skip]
+#[inline]
+const fn py_unicode_is_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        | '\u{0009}'
+        | '\u{000A}'
+        | '\u{000B}'
+        | '\u{000C}'
+        | '\u{000D}'
+        | '\u{001C}'
+        | '\u{001D}'
+        | '\u{001E}'
+        | '\u{001F}'
+        | '\u{0020}'
+        | '\u{0085}'
+        | '\u{00A0}'
+        | '\u{1680}'
+        | '\u{2000}'..='\u{200A}'
+        | '\u{2028}'
+        | '\u{2029}'
+        | '\u{202F}'
+        | '\u{205F}'
+        | '\u{3000}'
+    )
 }

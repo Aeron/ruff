@@ -8,7 +8,6 @@ use std::error::Error;
 use anyhow::Result;
 use libcst_native::{ImportAlias, Name as cstName, NameOrAttribute};
 
-use ruff_diagnostics::Edit;
 use ruff_python_ast::{self as ast, Expr, ModModule, Stmt};
 use ruff_python_codegen::Stylist;
 use ruff_python_parser::{Parsed, Tokens};
@@ -18,11 +17,12 @@ use ruff_python_semantic::{
 use ruff_python_trivia::textwrap::indent;
 use ruff_text_size::{Ranged, TextSize};
 
+use crate::Edit;
+use crate::Locator;
 use crate::cst::matchers::{match_aliases, match_import_from, match_statement};
 use crate::fix;
 use crate::fix::codemods::CodegenStylist;
 use crate::importer::insertion::Insertion;
-use crate::Locator;
 
 mod insertion;
 
@@ -453,6 +453,7 @@ impl<'a> Importer<'a> {
                 names,
                 level,
                 range: _,
+                node_index: _,
             }) = stmt
             {
                 if *level == 0
@@ -525,6 +526,17 @@ impl<'a> Importer<'a> {
         } else {
             None
         }
+    }
+
+    /// Add a `from __future__ import annotations` import.
+    pub(crate) fn add_future_import(&self) -> Edit {
+        let import = &NameImport::ImportFrom(MemberNameImport::member(
+            "__future__".to_string(),
+            "annotations".to_string(),
+        ));
+        // Note that `TextSize::default` should ensure that the import is added at the very
+        // beginning of the file via `Insertion::start_of_file`.
+        self.add_import(import, TextSize::default())
     }
 }
 

@@ -57,7 +57,7 @@ impl NameImport {
     }
 
     /// Returns the [`QualifiedName`] of the imported name (e.g., given `from foo import bar as baz`, returns `["foo", "bar"]`).
-    pub fn qualified_name(&self) -> QualifiedName {
+    pub fn qualified_name(&self) -> QualifiedName<'_> {
         match self {
             NameImport::Import(import) => QualifiedName::user_defined(&import.name.name),
             NameImport::ImportFrom(import_from) => collect_import_from_member(
@@ -230,6 +230,7 @@ impl<'de> serde::de::Deserialize<'de> for NameImports {
                         names,
                         level,
                         range: _,
+                        node_index: _,
                     }) => names
                         .iter()
                         .map(|name| {
@@ -243,7 +244,11 @@ impl<'de> serde::de::Deserialize<'de> for NameImports {
                             })
                         })
                         .collect(),
-                    Stmt::Import(ast::StmtImport { names, range: _ }) => names
+                    Stmt::Import(ast::StmtImport {
+                        names,
+                        range: _,
+                        node_index: _,
+                    }) => names
                         .iter()
                         .map(|name| {
                             NameImport::Import(ModuleNameImport {
@@ -273,7 +278,7 @@ impl schemars::JsonSchema for NameImports {
         "NameImports".to_string()
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(_gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         schemars::schema::SchemaObject {
             instance_type: Some(schemars::schema::InstanceType::String.into()),
             ..Default::default()
