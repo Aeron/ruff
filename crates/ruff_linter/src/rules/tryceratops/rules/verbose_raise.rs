@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, ExceptHandler, Expr, Stmt};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::statement_visitor::{walk_stmt, StatementVisitor};
 use ruff_text_size::Ranged;
 
@@ -35,48 +35,22 @@ use crate::checkers::ast::Checker;
 /// ## Fix safety
 /// This rule's fix is marked as unsafe, as it doesn't properly handle bound
 /// exceptions that are shadowed between the `except` and `raise` statements.
-#[violation]
-pub struct VerboseRaise;
+#[derive(ViolationMetadata)]
+pub(crate) struct VerboseRaise;
 
 impl AlwaysFixableViolation for VerboseRaise {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `raise` without specifying exception name")
+        "Use `raise` without specifying exception name".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Remove exception name")
-    }
-}
-
-#[derive(Default)]
-struct RaiseStatementVisitor<'a> {
-    raises: Vec<&'a ast::StmtRaise>,
-}
-
-impl<'a, 'b> StatementVisitor<'b> for RaiseStatementVisitor<'a>
-where
-    'b: 'a,
-{
-    fn visit_stmt(&mut self, stmt: &'b Stmt) {
-        match stmt {
-            Stmt::Raise(raise @ ast::StmtRaise { .. }) => {
-                self.raises.push(raise);
-            }
-            Stmt::Try(ast::StmtTry {
-                body, finalbody, ..
-            }) => {
-                for stmt in body.iter().chain(finalbody.iter()) {
-                    walk_stmt(self, stmt);
-                }
-            }
-            _ => walk_stmt(self, stmt),
-        }
+        "Remove exception name".to_string()
     }
 }
 
 /// TRY201
-pub(crate) fn verbose_raise(checker: &mut Checker, handlers: &[ExceptHandler]) {
+pub(crate) fn verbose_raise(checker: &Checker, handlers: &[ExceptHandler]) {
     for handler in handlers {
         // If the handler assigned a name to the exception...
         if let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
@@ -103,11 +77,34 @@ pub(crate) fn verbose_raise(checker: &mut Checker, handlers: &[ExceptHandler]) {
                                 "raise".to_string(),
                                 raise.range(),
                             )));
-                            checker.diagnostics.push(diagnostic);
+                            checker.report_diagnostic(diagnostic);
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Default)]
+struct RaiseStatementVisitor<'a> {
+    raises: Vec<&'a ast::StmtRaise>,
+}
+
+impl<'a> StatementVisitor<'a> for RaiseStatementVisitor<'a> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::Raise(raise @ ast::StmtRaise { .. }) => {
+                self.raises.push(raise);
+            }
+            Stmt::Try(ast::StmtTry {
+                body, finalbody, ..
+            }) => {
+                for stmt in body.iter().chain(finalbody) {
+                    walk_stmt(self, stmt);
+                }
+            }
+            _ => walk_stmt(self, stmt),
         }
     }
 }

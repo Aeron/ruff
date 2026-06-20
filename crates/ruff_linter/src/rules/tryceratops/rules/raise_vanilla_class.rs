@@ -1,18 +1,19 @@
-use ruff_python_ast::{self as ast, Expr};
+use ruff_python_ast::helpers::map_callable;
+use ruff_python_ast::Expr;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 
 /// ## What it does
-/// Checks for code that raises `Exception` directly.
+/// Checks for code that raises `Exception` or `BaseException` directly.
 ///
 /// ## Why is this bad?
-/// Handling such exceptions requires the use of `except Exception`, which
-/// captures _any_ raised exception, including failed assertions,
-/// division by zero, and more.
+/// Handling such exceptions requires the use of `except Exception` or
+/// `except BaseException`. These will capture almost _any_ raised exception,
+/// including failed assertions, division by zero, and more.
 ///
 /// Prefer to raise your own exception, or a more specific built-in
 /// exception, so that you can avoid over-capturing exceptions that you
@@ -51,29 +52,28 @@ use crate::checkers::ast::Checker;
 ///     except Exception:
 ///         logger.error("Oops")
 /// ```
-#[violation]
-pub struct RaiseVanillaClass;
+#[derive(ViolationMetadata)]
+pub(crate) struct RaiseVanillaClass;
 
 impl Violation for RaiseVanillaClass {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Create your own exception")
+        "Create your own exception".to_string()
     }
 }
 
 /// TRY002
-pub(crate) fn raise_vanilla_class(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn raise_vanilla_class(checker: &Checker, expr: &Expr) {
     if checker
         .semantic()
-        .resolve_call_path(if let Expr::Call(ast::ExprCall { func, .. }) = expr {
-            func
-        } else {
-            expr
+        .resolve_qualified_name(map_callable(expr))
+        .is_some_and(|qualified_name| {
+            matches!(
+                qualified_name.segments(),
+                ["" | "builtins", "Exception" | "BaseException"]
+            )
         })
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["", "Exception"]))
     {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(RaiseVanillaClass, expr.range()));
+        checker.report_diagnostic(Diagnostic::new(RaiseVanillaClass, expr.range()));
     }
 }

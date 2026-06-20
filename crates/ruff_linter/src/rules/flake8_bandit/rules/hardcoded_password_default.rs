@@ -1,7 +1,7 @@
-use ruff_python_ast::{Expr, Parameter, ParameterWithDefault, Parameters};
+use ruff_python_ast::{Expr, Parameter, Parameters};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -22,24 +22,24 @@ use super::super::helpers::{matches_password_name, string_literal};
 /// control.
 ///
 /// ## Example
+///
 /// ```python
-/// def connect_to_server(password="hunter2"):
-///     ...
+/// def connect_to_server(password="hunter2"): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// import os
 ///
 ///
-/// def connect_to_server(password=os.environ["PASSWORD"]):
-///     ...
+/// def connect_to_server(password=os.environ["PASSWORD"]): ...
 /// ```
 ///
 /// ## References
 /// - [Common Weakness Enumeration: CWE-259](https://cwe.mitre.org/data/definitions/259.html)
-#[violation]
-pub struct HardcodedPasswordDefault {
+#[derive(ViolationMetadata)]
+pub(crate) struct HardcodedPasswordDefault {
     name: String,
 }
 
@@ -69,22 +69,13 @@ fn check_password_kwarg(parameter: &Parameter, default: &Expr) -> Option<Diagnos
 }
 
 /// S107
-pub(crate) fn hardcoded_password_default(checker: &mut Checker, parameters: &Parameters) {
-    for ParameterWithDefault {
-        parameter,
-        default,
-        range: _,
-    } in parameters
-        .posonlyargs
-        .iter()
-        .chain(&parameters.args)
-        .chain(&parameters.kwonlyargs)
-    {
-        let Some(default) = default else {
+pub(crate) fn hardcoded_password_default(checker: &Checker, parameters: &Parameters) {
+    for parameter in parameters.iter_non_variadic_params() {
+        let Some(default) = parameter.default() else {
             continue;
         };
-        if let Some(diagnostic) = check_password_kwarg(parameter, default) {
-            checker.diagnostics.push(diagnostic);
+        if let Some(diagnostic) = check_password_kwarg(&parameter.parameter, default) {
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

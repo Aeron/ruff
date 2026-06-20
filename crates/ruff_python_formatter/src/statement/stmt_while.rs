@@ -1,13 +1,12 @@
 use ruff_formatter::{format_args, write};
-use ruff_python_ast::AstNode;
 use ruff_python_ast::{Stmt, StmtWhile};
 use ruff_text_size::Ranged;
 
-use crate::comments::SourceComment;
 use crate::expression::maybe_parenthesize_expression;
 use crate::expression::parentheses::Parenthesize;
 use crate::prelude::*;
 use crate::statement::clause::{clause_body, clause_header, ClauseHeader, ElseClause};
+use crate::statement::suite::SuiteKind;
 
 #[derive(Default)]
 pub struct FormatStmtWhile;
@@ -22,7 +21,7 @@ impl FormatNodeRule<StmtWhile> for FormatStmtWhile {
         } = item;
 
         let comments = f.context().comments().clone();
-        let dangling_comments = comments.dangling(item.as_any_node_ref());
+        let dangling_comments = comments.dangling(item);
 
         let body_start = body.first().map_or(test.end(), Stmt::start);
         let or_else_comments_start =
@@ -43,7 +42,11 @@ impl FormatNodeRule<StmtWhile> for FormatStmtWhile {
                         maybe_parenthesize_expression(test, item, Parenthesize::IfBreaks),
                     ]
                 ),
-                clause_body(body, trailing_condition_comments),
+                clause_body(
+                    body,
+                    SuiteKind::other(orelse.is_empty()),
+                    trailing_condition_comments
+                ),
             ]
         )?;
 
@@ -63,20 +66,11 @@ impl FormatNodeRule<StmtWhile> for FormatStmtWhile {
                         &token("else")
                     )
                     .with_leading_comments(leading, body.last()),
-                    clause_body(orelse, trailing),
+                    clause_body(orelse, SuiteKind::other(true), trailing),
                 ]
             )?;
         }
 
-        Ok(())
-    }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Handled in `fmt_fields`
         Ok(())
     }
 }

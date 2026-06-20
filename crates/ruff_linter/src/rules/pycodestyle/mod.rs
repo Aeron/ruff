@@ -16,7 +16,7 @@ mod tests {
 
     use crate::line_width::LineLength;
     use crate::registry::Rule;
-    use crate::rules::pycodestyle;
+    use crate::rules::{isort, pycodestyle};
     use crate::settings::types::PreviewMode;
     use crate::test::test_path;
     use crate::{assert_messages, settings};
@@ -26,17 +26,26 @@ mod tests {
     #[test_case(Rule::AmbiguousClassName, Path::new("E742.py"))]
     #[test_case(Rule::AmbiguousFunctionName, Path::new("E743.py"))]
     #[test_case(Rule::AmbiguousVariableName, Path::new("E741.py"))]
+    // E741 is disapplied for `.pyi` files (see #13119 for rationale);
+    // this fixture tests that we emit no errors there
+    #[test_case(Rule::AmbiguousVariableName, Path::new("E741.pyi"))]
     #[test_case(Rule::LambdaAssignment, Path::new("E731.py"))]
     #[test_case(Rule::BareExcept, Path::new("E722.py"))]
     #[test_case(Rule::BlankLineWithWhitespace, Path::new("W29.py"))]
+    #[test_case(Rule::BlankLineWithWhitespace, Path::new("W293.py"))]
     #[test_case(Rule::InvalidEscapeSequence, Path::new("W605_0.py"))]
     #[test_case(Rule::InvalidEscapeSequence, Path::new("W605_1.py"))]
-    #[test_case(Rule::InvalidEscapeSequence, Path::new("W605_2.py"))]
     #[test_case(Rule::LineTooLong, Path::new("E501.py"))]
     #[test_case(Rule::LineTooLong, Path::new("E501_3.py"))]
+    #[test_case(Rule::LineTooLong, Path::new("E501_4.py"))]
     #[test_case(Rule::MixedSpacesAndTabs, Path::new("E101.py"))]
     #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E40.py"))]
-    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402_0.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402_1.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402_2.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402_3.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402_4.py"))]
+    #[test_case(Rule::ModuleImportNotAtTopOfFile, Path::new("E402.ipynb"))]
     #[test_case(Rule::MultipleImportsOnOneLine, Path::new("E40.py"))]
     #[test_case(Rule::MultipleStatementsOnOneLineColon, Path::new("E70.py"))]
     #[test_case(Rule::MultipleStatementsOnOneLineSemicolon, Path::new("E70.py"))]
@@ -47,13 +56,14 @@ mod tests {
     #[test_case(Rule::NoneComparison, Path::new("E711.py"))]
     #[test_case(Rule::NotInTest, Path::new("E713.py"))]
     #[test_case(Rule::NotIsTest, Path::new("E714.py"))]
-    #[test_case(Rule::SyntaxError, Path::new("E999.py"))]
     #[test_case(Rule::TabIndentation, Path::new("W19.py"))]
     #[test_case(Rule::TrailingWhitespace, Path::new("W29.py"))]
+    #[test_case(Rule::TrailingWhitespace, Path::new("W291.py"))]
     #[test_case(Rule::TrueFalseComparison, Path::new("E712.py"))]
     #[test_case(Rule::TypeComparison, Path::new("E721.py"))]
     #[test_case(Rule::UselessSemicolon, Path::new("E70.py"))]
     #[test_case(Rule::UselessSemicolon, Path::new("E703.ipynb"))]
+    #[test_case(Rule::WhitespaceAfterDecorator, Path::new("E204.py"))]
     fn rules(rule_code: Rule, path: &Path) -> Result<()> {
         let snapshot = format!("{}_{}", rule_code.noqa_code(), path.to_string_lossy());
         let diagnostics = test_path(
@@ -64,8 +74,13 @@ mod tests {
         Ok(())
     }
 
-    #[test_case(Rule::IsLiteral, Path::new("constant_literals.py"))]
-    #[test_case(Rule::TypeComparison, Path::new("E721.py"))]
+    #[test_case(Rule::RedundantBackslash, Path::new("E502.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391_0.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391_1.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391_2.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391_3.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391_4.py"))]
+    #[test_case(Rule::TooManyNewlinesAtEndOfFile, Path::new("W391.ipynb"))]
     fn preview_rules(rule_code: Rule, path: &Path) -> Result<()> {
         let snapshot = format!(
             "preview__{}_{}",
@@ -140,6 +155,171 @@ mod tests {
             &settings::LinterSettings::for_rule(rule_code),
         )?;
         assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    /// Tests the compatibility of E2 rules (E202, E225 and E275) on syntactically incorrect code.
+    #[test]
+    fn white_space_syntax_error_compatibility() -> Result<()> {
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E2_syntax_error.py"),
+            &settings::LinterSettings {
+                ..settings::LinterSettings::for_rules([
+                    Rule::MissingWhitespaceAroundOperator,
+                    Rule::MissingWhitespaceAfterKeyword,
+                    Rule::WhitespaceBeforeCloseBracket,
+                ])
+            },
+        )?;
+        assert_messages!(diagnostics);
+        Ok(())
+    }
+
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E302_first_line_docstring.py"))]
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E302_first_line_expression.py"))]
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E302_first_line_function.py"))]
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E302_first_line_statement.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E303_first_line_comment.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E303_first_line_docstring.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E303_first_line_expression.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E303_first_line_statement.py"))]
+    fn blank_lines_first_line(rule_code: Rule, path: &Path) -> Result<()> {
+        let snapshot = format!("{}_{}", rule_code.noqa_code(), path.to_string_lossy());
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join(path).as_path(),
+            &settings::LinterSettings::for_rule(rule_code),
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test_case(Rule::BlankLineBetweenMethods, Path::new("E30.py"))]
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E30.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E30.py"))]
+    #[test_case(Rule::BlankLineAfterDecorator, Path::new("E30.py"))]
+    #[test_case(Rule::BlankLinesAfterFunctionOrClass, Path::new("E30.py"))]
+    #[test_case(Rule::BlankLinesBeforeNestedDefinition, Path::new("E30.py"))]
+    #[test_case(Rule::BlankLineBetweenMethods, Path::new("E30_syntax_error.py"))]
+    #[test_case(Rule::BlankLinesTopLevel, Path::new("E30_syntax_error.py"))]
+    #[test_case(Rule::TooManyBlankLines, Path::new("E30_syntax_error.py"))]
+    #[test_case(Rule::BlankLinesAfterFunctionOrClass, Path::new("E30_syntax_error.py"))]
+    #[test_case(
+        Rule::BlankLinesBeforeNestedDefinition,
+        Path::new("E30_syntax_error.py")
+    )]
+    fn blank_lines(rule_code: Rule, path: &Path) -> Result<()> {
+        let snapshot = format!("{}_{}", rule_code.noqa_code(), path.to_string_lossy());
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join(path).as_path(),
+            &settings::LinterSettings::for_rule(rule_code),
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    /// Tests the compatibility of the blank line top level rule and isort.
+    #[test_case(-1, 0)]
+    #[test_case(1, 1)]
+    #[test_case(0, 0)]
+    #[test_case(4, 4)]
+    fn blank_lines_top_level_isort_compatibility(
+        lines_after_imports: isize,
+        lines_between_types: usize,
+    ) -> Result<()> {
+        let snapshot = format!(
+            "blank_lines_top_level_isort_compatibility-lines-after({lines_after_imports})-between({lines_between_types})"
+        );
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E30_isort.py"),
+            &settings::LinterSettings {
+                isort: isort::settings::Settings {
+                    lines_after_imports,
+                    lines_between_types,
+                    ..isort::settings::Settings::default()
+                },
+                ..settings::LinterSettings::for_rules([
+                    Rule::BlankLinesTopLevel,
+                    Rule::UnsortedImports,
+                ])
+            },
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    /// Tests the compatibility of the blank line too many lines and isort.
+    #[test_case(-1, 0)]
+    #[test_case(1, 1)]
+    #[test_case(0, 0)]
+    #[test_case(4, 4)]
+    fn too_many_blank_lines_isort_compatibility(
+        lines_after_imports: isize,
+        lines_between_types: usize,
+    ) -> Result<()> {
+        let snapshot = format!("too_many_blank_lines_isort_compatibility-lines-after({lines_after_imports})-between({lines_between_types})");
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E30_isort.py"),
+            &settings::LinterSettings {
+                isort: isort::settings::Settings {
+                    lines_after_imports,
+                    lines_between_types,
+                    ..isort::settings::Settings::default()
+                },
+                ..settings::LinterSettings::for_rules([
+                    Rule::TooManyBlankLines,
+                    Rule::UnsortedImports,
+                ])
+            },
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test_case(Rule::BlankLineBetweenMethods)]
+    #[test_case(Rule::BlankLinesTopLevel)]
+    #[test_case(Rule::TooManyBlankLines)]
+    #[test_case(Rule::BlankLineAfterDecorator)]
+    #[test_case(Rule::BlankLinesAfterFunctionOrClass)]
+    #[test_case(Rule::BlankLinesBeforeNestedDefinition)]
+    fn blank_lines_typing_stub(rule_code: Rule) -> Result<()> {
+        let snapshot = format!("blank_lines_{}_typing_stub", rule_code.noqa_code());
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E30.pyi"),
+            &settings::LinterSettings::for_rule(rule_code),
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test_case(Rule::BlankLineBetweenMethods)]
+    #[test_case(Rule::BlankLinesTopLevel)]
+    #[test_case(Rule::TooManyBlankLines)]
+    #[test_case(Rule::BlankLineAfterDecorator)]
+    #[test_case(Rule::BlankLinesAfterFunctionOrClass)]
+    #[test_case(Rule::BlankLinesBeforeNestedDefinition)]
+    fn blank_lines_notebook(rule_code: Rule) -> Result<()> {
+        let snapshot = format!("blank_lines_{}_notebook", rule_code.noqa_code());
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E30.ipynb"),
+            &settings::LinterSettings::for_rule(rule_code),
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test]
+    fn blank_lines_typing_stub_isort() -> Result<()> {
+        let diagnostics = test_path(
+            Path::new("pycodestyle").join("E30_isort.pyi"),
+            &settings::LinterSettings {
+                ..settings::LinterSettings::for_rules([
+                    Rule::TooManyBlankLines,
+                    Rule::BlankLinesTopLevel,
+                    Rule::UnsortedImports,
+                ])
+            },
+        )?;
+        assert_messages!(diagnostics);
         Ok(())
     }
 

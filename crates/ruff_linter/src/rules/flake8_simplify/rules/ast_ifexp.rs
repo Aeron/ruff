@@ -2,8 +2,9 @@ use ruff_python_ast::{self as ast, Arguments, Expr, ExprContext, UnaryOp};
 use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::{is_const_false, is_const_true};
+use ruff_python_ast::name::Name;
 use ruff_python_ast::parenthesize::parenthesized_range;
 
 use crate::checkers::ast::Checker;
@@ -28,8 +29,8 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
-#[violation]
-pub struct IfExprWithTrueFalse {
+#[derive(ViolationMetadata)]
+pub(crate) struct IfExprWithTrueFalse {
     is_compare: bool,
 }
 
@@ -38,21 +39,20 @@ impl Violation for IfExprWithTrueFalse {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let IfExprWithTrueFalse { is_compare } = self;
-        if *is_compare {
-            format!("Remove unnecessary `True if ... else False`")
+        if self.is_compare {
+            "Remove unnecessary `True if ... else False`".to_string()
         } else {
-            format!("Use `bool(...)` instead of `True if ... else False`")
+            "Use `bool(...)` instead of `True if ... else False`".to_string()
         }
     }
 
     fn fix_title(&self) -> Option<String> {
-        let IfExprWithTrueFalse { is_compare } = self;
-        if *is_compare {
-            Some(format!("Remove unnecessary `True if ... else False`"))
+        let title = if self.is_compare {
+            "Remove unnecessary `True if ... else False`"
         } else {
-            Some(format!("Replace with `bool(...)"))
-        }
+            "Replace with `bool(...)"
+        };
+        Some(title.to_string())
     }
 }
 
@@ -61,7 +61,7 @@ impl Violation for IfExprWithTrueFalse {
 /// condition.
 ///
 /// ## Why is this bad?
-/// `if` expressions that evaluate to `False` for a truthy condition an `True`
+/// `if` expressions that evaluate to `False` for a truthy condition and `True`
 /// for a falsey condition can be replaced with `not` operators, which are more
 /// concise and readable.
 ///
@@ -77,17 +77,17 @@ impl Violation for IfExprWithTrueFalse {
 ///
 /// ## References
 /// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
-#[violation]
-pub struct IfExprWithFalseTrue;
+#[derive(ViolationMetadata)]
+pub(crate) struct IfExprWithFalseTrue;
 
 impl AlwaysFixableViolation for IfExprWithFalseTrue {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `not ...` instead of `False if ... else True`")
+        "Use `not ...` instead of `False if ... else True`".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Replace with `not ...`")
+        "Replace with `not ...`".to_string()
     }
 }
 
@@ -110,8 +110,8 @@ impl AlwaysFixableViolation for IfExprWithFalseTrue {
 ///
 /// ## References
 /// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
-#[violation]
-pub struct IfExprWithTwistedArms {
+#[derive(ViolationMetadata)]
+pub(crate) struct IfExprWithTwistedArms {
     expr_body: String,
     expr_else: String,
 }
@@ -140,7 +140,7 @@ impl AlwaysFixableViolation for IfExprWithTwistedArms {
 
 /// SIM210
 pub(crate) fn if_expr_with_true_false(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
@@ -164,7 +164,7 @@ pub(crate) fn if_expr_with_true_false(
                     parenthesized_range(
                         test.into(),
                         expr.into(),
-                        checker.indexer().comment_ranges(),
+                        checker.comment_ranges(),
                         checker.locator().contents(),
                     )
                     .unwrap_or(test.range()),
@@ -172,21 +172,21 @@ pub(crate) fn if_expr_with_true_false(
                 .to_string(),
             expr.range(),
         )));
-    } else if checker.semantic().is_builtin("bool") {
+    } else if checker.semantic().has_builtin_binding("bool") {
         diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
             checker.generator().expr(
                 &ast::ExprCall {
                     func: Box::new(
                         ast::ExprName {
-                            id: "bool".into(),
+                            id: Name::new_static("bool"),
                             ctx: ExprContext::Load,
                             range: TextRange::default(),
                         }
                         .into(),
                     ),
                     arguments: Arguments {
-                        args: vec![test.clone()],
-                        keywords: vec![],
+                        args: Box::from([test.clone()]),
+                        keywords: Box::from([]),
                         range: TextRange::default(),
                     },
                     range: TextRange::default(),
@@ -196,12 +196,12 @@ pub(crate) fn if_expr_with_true_false(
             expr.range(),
         )));
     };
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// SIM211
 pub(crate) fn if_expr_with_false_true(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
@@ -223,12 +223,12 @@ pub(crate) fn if_expr_with_false_true(
         ),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// SIM212
 pub(crate) fn twisted_arms_in_ifexpr(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
@@ -267,7 +267,7 @@ pub(crate) fn twisted_arms_in_ifexpr(
     let node = body.clone();
     let node1 = orelse.clone();
     let node2 = orelse.clone();
-    let node3 = ast::ExprIfExp {
+    let node3 = ast::ExprIf {
         test: Box::new(node2),
         body: Box::new(node1),
         orelse: Box::new(node),
@@ -277,5 +277,5 @@ pub(crate) fn twisted_arms_in_ifexpr(
         checker.generator().expr(&node3.into()),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

@@ -31,8 +31,7 @@ def function(
     kwonly_nonboolvalued_boolhint: bool = 1,
     kwonly_nonboolvalued_boolstrhint: "bool" = 1,
     **kw,
-):
-    ...
+): ...
 
 
 def used(do):
@@ -71,6 +70,8 @@ foo.is_(True)
 bar.is_not(False)
 next(iter([]), False)
 sa.func.coalesce(tbl.c.valid, False)
+setVisible(True)
+set_visible(True)
 
 
 class Registry:
@@ -93,7 +94,7 @@ class Registry:
         object.__setattr__(self, "flag", True)
 
 
-from typing import Optional, Union
+from typing import Optional, Union, Self
 
 
 def func(x: Union[list, Optional[int | str | float | bool]]):
@@ -106,3 +107,70 @@ def func(x: bool | str):
 
 def func(x: int | str):
     pass
+
+
+from typing import override
+
+
+@override
+def func(x: bool):
+    pass
+
+
+settings(True)
+
+
+from dataclasses import dataclass, InitVar
+
+
+@dataclass
+class Fit:
+    force: InitVar[bool] = False
+
+    def __post_init__(self, force: bool) -> None:
+        print(force)
+
+
+Fit(force=True)
+
+
+# https://github.com/astral-sh/ruff/issues/10356
+from django.db.models import Case, Q, Value, When
+
+
+qs.annotate(
+    is_foo_or_bar=Case(
+        When(Q(is_foo=True) | Q(is_bar=True)),
+        then=Value(True),
+    ),
+    default=Value(False),
+)
+
+
+# https://github.com/astral-sh/ruff/issues/10485
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    foo: bool = Field(True, exclude=True)
+
+
+# https://github.com/astral-sh/ruff/issues/14202
+class SupportsXorBool:
+    def __xor__(self, other: bool) -> Self: ...
+
+# check overload
+class CustomFloat:
+    @overload
+    def __mul__(self, other: bool) -> Self: ...
+    @overload
+    def __mul__(self, other: float) -> Self: ...
+    @overload
+    def __mul__(self, other: Self) -> Self: ...
+
+# check union
+class BooleanArray:
+    def __or__(self, other: Self | bool) -> Self: ...
+    def __ror__(self, other: Self | bool) -> Self: ...
+    def __ior__(self, other: Self | bool) -> Self: ...

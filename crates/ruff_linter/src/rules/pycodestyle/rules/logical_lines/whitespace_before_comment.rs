@@ -1,12 +1,13 @@
-use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_parser::TokenKind;
 use ruff_python_trivia::PythonWhitespace;
-use ruff_source_file::Locator;
+use ruff_source_file::LineRanges;
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 
 use crate::checkers::logical_lines::LogicalLinesContext;
 use crate::rules::pycodestyle::rules::logical_lines::LogicalLine;
+use crate::Locator;
 
 /// ## What it does
 /// Checks if inline comments are separated by at least two spaces.
@@ -14,7 +15,7 @@ use crate::rules::pycodestyle::rules::logical_lines::LogicalLine;
 /// ## Why is this bad?
 /// An inline comment is a comment on the same line as a statement.
 ///
-/// Per PEP8, inline comments should be separated by at least two spaces from
+/// Per [PEP 8], inline comments should be separated by at least two spaces from
 /// the preceding statement.
 ///
 /// ## Example
@@ -27,17 +28,19 @@ use crate::rules::pycodestyle::rules::logical_lines::LogicalLine;
 /// x = x + 1  # Increment x
 /// x = x + 1    # Increment x
 /// ```
-#[violation]
-pub struct TooFewSpacesBeforeInlineComment;
+///
+/// [PEP 8]: https://peps.python.org/pep-0008/#comments
+#[derive(ViolationMetadata)]
+pub(crate) struct TooFewSpacesBeforeInlineComment;
 
 impl AlwaysFixableViolation for TooFewSpacesBeforeInlineComment {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Insert at least two spaces before an inline comment")
+        "Insert at least two spaces before an inline comment".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Insert spaces")
+        "Insert spaces".to_string()
     }
 }
 
@@ -47,7 +50,7 @@ impl AlwaysFixableViolation for TooFewSpacesBeforeInlineComment {
 /// ## Why is this bad?
 /// An inline comment is a comment on the same line as a statement.
 ///
-/// Per PEP8, inline comments should start with a # and a single space.
+/// Per [PEP 8], inline comments should start with a # and a single space.
 ///
 /// ## Example
 /// ```python
@@ -63,24 +66,31 @@ impl AlwaysFixableViolation for TooFewSpacesBeforeInlineComment {
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#comments
-#[violation]
-pub struct NoSpaceAfterInlineComment;
+#[derive(ViolationMetadata)]
+pub(crate) struct NoSpaceAfterInlineComment;
 
-impl Violation for NoSpaceAfterInlineComment {
+impl AlwaysFixableViolation for NoSpaceAfterInlineComment {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Inline comment should start with `# `")
+        "Inline comment should start with `# `".to_string()
+    }
+
+    fn fix_title(&self) -> String {
+        "Format space".to_string()
     }
 }
 
 /// ## What it does
-/// Checks if one space is used after block comments.
+/// Checks for block comments that lack a single space after the leading `#` character.
 ///
 /// ## Why is this bad?
-/// Per PEP8, "Block comments generally consist of one or more paragraphs built
+/// Per [PEP 8], "Block comments generally consist of one or more paragraphs built
 /// out of complete sentences, with each sentence ending in a period."
 ///
-/// Block comments should start with a # and a single space.
+/// Block comments should start with a `#` followed by a single space.
+///
+/// Shebangs (lines starting with `#!`, at the top of a file) are exempt from this
+/// rule.
 ///
 /// ## Example
 /// ```python
@@ -89,30 +99,35 @@ impl Violation for NoSpaceAfterInlineComment {
 ///
 /// Use instead:
 /// ```python
-/// # Block comments:
-/// #  - Block comment list
-/// # \xa0- Block comment list
+/// # Block comment
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#comments
-#[violation]
-pub struct NoSpaceAfterBlockComment;
+#[derive(ViolationMetadata)]
+pub(crate) struct NoSpaceAfterBlockComment;
 
-impl Violation for NoSpaceAfterBlockComment {
+impl AlwaysFixableViolation for NoSpaceAfterBlockComment {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Block comment should start with `# `")
+        "Block comment should start with `# `".to_string()
+    }
+
+    fn fix_title(&self) -> String {
+        "Format space".to_string()
     }
 }
 
 /// ## What it does
-/// Checks if block comments start with a single "#".
+/// Checks for block comments that start with multiple leading `#` characters.
 ///
 /// ## Why is this bad?
-/// Per PEP8, "Block comments generally consist of one or more paragraphs built
+/// Per [PEP 8], "Block comments generally consist of one or more paragraphs built
 /// out of complete sentences, with each sentence ending in a period."
 ///
-/// Each line of a block comment should start with a # and a single space.
+/// Each line of a block comment should start with a `#` followed by a single space.
+///
+/// Shebangs (lines starting with `#!`, at the top of a file) are exempt from this
+/// rule.
 ///
 /// ## Example
 /// ```python
@@ -121,19 +136,30 @@ impl Violation for NoSpaceAfterBlockComment {
 ///
 /// Use instead:
 /// ```python
-/// # Block comments:
-/// #  - Block comment list
-/// # \xa0- Block comment list
+/// # Block comment
+/// ```
+///
+/// Alternatively, this rule makes an exception for comments that consist
+/// solely of `#` characters, as in:
+///
+/// ```python
+/// ##############
+/// # Block header
+/// ##############
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#comments
-#[violation]
-pub struct MultipleLeadingHashesForBlockComment;
+#[derive(ViolationMetadata)]
+pub(crate) struct MultipleLeadingHashesForBlockComment;
 
-impl Violation for MultipleLeadingHashesForBlockComment {
+impl AlwaysFixableViolation for MultipleLeadingHashesForBlockComment {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Too many leading `#` before block comment")
+        "Too many leading `#` before block comment".to_string()
+    }
+
+    fn fix_title(&self) -> String {
+        "Remove leading `#`".to_string()
     }
 }
 
@@ -184,14 +210,30 @@ pub(crate) fn whitespace_before_comment(
 
             if is_inline_comment {
                 if bad_prefix.is_some() || comment.chars().next().is_some_and(char::is_whitespace) {
-                    context.push(NoSpaceAfterInlineComment, range);
+                    let mut diagnostic = Diagnostic::new(NoSpaceAfterInlineComment, range);
+                    diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+                        format_leading_space(token_text),
+                        range,
+                    )));
+                    context.push_diagnostic(diagnostic);
                 }
             } else if let Some(bad_prefix) = bad_prefix {
                 if bad_prefix != '!' || !line.is_start_of_file() {
                     if bad_prefix != '#' {
-                        context.push(NoSpaceAfterBlockComment, range);
+                        let mut diagnostic = Diagnostic::new(NoSpaceAfterBlockComment, range);
+                        diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+                            format_leading_space(token_text),
+                            range,
+                        )));
+                        context.push_diagnostic(diagnostic);
                     } else if !comment.is_empty() {
-                        context.push(MultipleLeadingHashesForBlockComment, range);
+                        let mut diagnostic =
+                            Diagnostic::new(MultipleLeadingHashesForBlockComment, range);
+                        diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+                            format_leading_hashes(token_text),
+                            range,
+                        )));
+                        context.push_diagnostic(diagnostic);
                     }
                 }
             }
@@ -199,4 +241,18 @@ pub(crate) fn whitespace_before_comment(
             prev_end = token.end();
         }
     }
+}
+
+/// Format a comment to have a single space after the `#`.
+fn format_leading_space(comment: &str) -> String {
+    if let Some(rest) = comment.strip_prefix("#:") {
+        format!("#: {}", rest.trim_start())
+    } else {
+        format!("# {}", comment.trim_start_matches('#').trim_start())
+    }
+}
+
+/// Format a comment to strip multiple leading `#` characters.
+fn format_leading_hashes(comment: &str) -> String {
+    format!("# {}", comment.trim_start_matches('#').trim_start())
 }

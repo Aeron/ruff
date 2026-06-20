@@ -1,6 +1,6 @@
 use crate::fix::edits::pad;
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::generate_comparison;
 use ruff_python_ast::{self as ast, CmpOp, Expr};
 use ruff_text_size::Ranged;
@@ -9,10 +9,10 @@ use crate::checkers::ast::Checker;
 use crate::registry::Rule;
 
 /// ## What it does
-/// Checks for negative comparison using `not {foo} in {bar}`.
+/// Checks for membership tests using `not {element} in {collection}`.
 ///
 /// ## Why is this bad?
-/// Negative comparison should be done using `not in`.
+/// Testing membership with `{element} not in {collection}` is more readable.
 ///
 /// ## Example
 /// ```python
@@ -27,13 +27,13 @@ use crate::registry::Rule;
 /// if X.B not in Y:
 ///     pass
 /// ```
-#[violation]
-pub struct NotInTest;
+#[derive(ViolationMetadata)]
+pub(crate) struct NotInTest;
 
 impl AlwaysFixableViolation for NotInTest {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Test for membership should be `not in`")
+        "Test for membership should be `not in`".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -42,10 +42,11 @@ impl AlwaysFixableViolation for NotInTest {
 }
 
 /// ## What it does
-/// Checks for negative comparison using `not {foo} is {bar}`.
+/// Checks for identity comparisons using `not {foo} is {bar}`.
 ///
 /// ## Why is this bad?
-/// Negative comparison should be done using `is not`.
+/// According to [PEP8], testing for an object's identity with `is not` is more
+/// readable.
 ///
 /// ## Example
 /// ```python
@@ -60,13 +61,15 @@ impl AlwaysFixableViolation for NotInTest {
 ///     pass
 /// Z = X.B is not Y
 /// ```
-#[violation]
-pub struct NotIsTest;
+///
+/// [PEP8]: https://peps.python.org/pep-0008/#programming-recommendations
+#[derive(ViolationMetadata)]
+pub(crate) struct NotIsTest;
 
 impl AlwaysFixableViolation for NotIsTest {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Test for object identity should be `is not`")
+        "Test for object identity should be `is not`".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -75,7 +78,7 @@ impl AlwaysFixableViolation for NotIsTest {
 }
 
 /// E713, E714
-pub(crate) fn not_tests(checker: &mut Checker, unary_op: &ast::ExprUnaryOp) {
+pub(crate) fn not_tests(checker: &Checker, unary_op: &ast::ExprUnaryOp) {
     if !unary_op.op.is_not() {
         return;
     }
@@ -90,7 +93,7 @@ pub(crate) fn not_tests(checker: &mut Checker, unary_op: &ast::ExprUnaryOp) {
         return;
     };
 
-    match ops.as_slice() {
+    match &**ops {
         [CmpOp::In] => {
             if checker.enabled(Rule::NotInTest) {
                 let mut diagnostic = Diagnostic::new(NotInTest, unary_op.operand.range());
@@ -101,15 +104,15 @@ pub(crate) fn not_tests(checker: &mut Checker, unary_op: &ast::ExprUnaryOp) {
                             &[CmpOp::NotIn],
                             comparators,
                             unary_op.into(),
-                            checker.indexer().comment_ranges(),
-                            checker.locator(),
+                            checker.comment_ranges(),
+                            checker.source(),
                         ),
                         unary_op.range(),
                         checker.locator(),
                     ),
                     unary_op.range(),
                 )));
-                checker.diagnostics.push(diagnostic);
+                checker.report_diagnostic(diagnostic);
             }
         }
         [CmpOp::Is] => {
@@ -122,15 +125,15 @@ pub(crate) fn not_tests(checker: &mut Checker, unary_op: &ast::ExprUnaryOp) {
                             &[CmpOp::IsNot],
                             comparators,
                             unary_op.into(),
-                            checker.indexer().comment_ranges(),
-                            checker.locator(),
+                            checker.comment_ranges(),
+                            checker.source(),
                         ),
                         unary_op.range(),
                         checker.locator(),
                     ),
                     unary_op.range(),
                 )));
-                checker.diagnostics.push(diagnostic);
+                checker.report_diagnostic(diagnostic);
             }
         }
         _ => {}

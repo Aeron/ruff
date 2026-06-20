@@ -51,3 +51,25 @@ foo == foo or foo == bar  # Self-comparison.
 foo[0] == "a" or foo[0] == "b"  # Subscripts.
 
 foo() == "a" or foo() == "b"  # Calls.
+
+import sys
+
+sys.platform == "win32" or sys.platform == "emscripten"  # sys attributes
+
+foo == "a" or "c" == bar or foo == "b" or "d" == bar  # Multiple targets
+
+foo == "a" or ("c" == bar or "d" == bar) or foo == "b"  # Multiple targets
+
+foo == "a" or foo == "b" or "c" != bar and "d" != bar  # Multiple targets
+
+foo == "a" or ("c" != bar and "d" != bar) or foo == "b"  # Multiple targets
+
+foo == "a" and "c" != bar or foo == "b" and "d" != bar  # Multiple targets
+
+foo == 1 or foo == True # Different types, same hashed value
+
+foo == 1 or foo == 1.0 # Different types, same hashed value
+
+foo == False or foo == 0 # Different types, same hashed value
+
+foo == 0.0 or foo == 0j # Different types, same hashed value

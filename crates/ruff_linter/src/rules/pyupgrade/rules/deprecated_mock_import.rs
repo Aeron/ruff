@@ -3,20 +3,21 @@ use libcst_native::{
     AsName, AssignTargetExpression, Attribute, Dot, Expression, Import, ImportAlias, ImportFrom,
     ImportNames, Name, NameOrAttribute, ParenthesizableWhitespace,
 };
-use log::error;
-use ruff_python_ast::{self as ast, Expr, Stmt};
+use log::debug;
 
-use crate::fix::codemods::CodegenStylist;
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::call_path::collect_call_path;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::UnqualifiedName;
 use ruff_python_ast::whitespace::indentation;
+use ruff_python_ast::{self as ast, Stmt};
 use ruff_python_codegen::Stylist;
-use ruff_source_file::Locator;
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 use crate::cst::matchers::{match_import, match_import_from, match_statement};
+use crate::fix::codemods::CodegenStylist;
+use crate::Locator;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub(crate) enum MockReference {
@@ -46,15 +47,15 @@ pub(crate) enum MockReference {
 /// ## References
 /// - [Python documentation: `unittest.mock`](https://docs.python.org/3/library/unittest.mock.html)
 /// - [PyPI: `mock`](https://pypi.org/project/mock/)
-#[violation]
-pub struct DeprecatedMockImport {
+#[derive(ViolationMetadata)]
+pub(crate) struct DeprecatedMockImport {
     reference_type: MockReference,
 }
 
 impl AlwaysFixableViolation for DeprecatedMockImport {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`mock` is deprecated, use `unittest.mock`")
+        "`mock` is deprecated, use `unittest.mock`".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -249,28 +250,30 @@ fn format_import_from(
 }
 
 /// UP026
-pub(crate) fn deprecated_mock_attribute(checker: &mut Checker, expr: &Expr) {
-    if let Expr::Attribute(ast::ExprAttribute { value, .. }) = expr {
-        if collect_call_path(value)
-            .is_some_and(|call_path| matches!(call_path.as_slice(), ["mock", "mock"]))
-        {
-            let mut diagnostic = Diagnostic::new(
-                DeprecatedMockImport {
-                    reference_type: MockReference::Attribute,
-                },
-                value.range(),
-            );
-            diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
-                "mock".to_string(),
-                value.range(),
-            )));
-            checker.diagnostics.push(diagnostic);
-        }
+pub(crate) fn deprecated_mock_attribute(checker: &Checker, attribute: &ast::ExprAttribute) {
+    if !checker.semantic().seen_module(Modules::MOCK) {
+        return;
+    }
+
+    if UnqualifiedName::from_expr(&attribute.value)
+        .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["mock", "mock"]))
+    {
+        let mut diagnostic = Diagnostic::new(
+            DeprecatedMockImport {
+                reference_type: MockReference::Attribute,
+            },
+            attribute.value.range(),
+        );
+        diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+            "mock".to_string(),
+            attribute.value.range(),
+        )));
+        checker.report_diagnostic(diagnostic);
     }
 }
 
 /// UP026
-pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
+pub(crate) fn deprecated_mock_import(checker: &Checker, stmt: &Stmt) {
     match stmt {
         Stmt::Import(ast::StmtImport { names, range: _ }) => {
             // Find all `mock` imports.
@@ -279,11 +282,11 @@ pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
                 .any(|name| &name.name == "mock" || &name.name == "mock.mock")
             {
                 // Generate the fix, if needed, which is shared between all `mock` imports.
-                let content = if let Some(indent) = indentation(checker.locator(), stmt) {
+                let content = if let Some(indent) = indentation(checker.source(), stmt) {
                     match format_import(stmt, indent, checker.locator(), checker.stylist()) {
                         Ok(content) => Some(content),
                         Err(e) => {
-                            error!("Failed to rewrite `mock` import: {e}");
+                            debug!("Failed to rewrite `mock` import: {e}");
                             None
                         }
                     }
@@ -306,7 +309,7 @@ pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
                                 stmt.range(),
                             )));
                         }
-                        checker.diagnostics.push(diagnostic);
+                        checker.report_diagnostic(diagnostic);
                     }
                 }
             }
@@ -316,7 +319,7 @@ pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
             level,
             ..
         }) => {
-            if level.is_some_and(|level| level > 0) {
+            if *level > 0 {
                 return;
             }
 
@@ -327,14 +330,14 @@ pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
                     },
                     stmt.range(),
                 );
-                if let Some(indent) = indentation(checker.locator(), stmt) {
+                if let Some(indent) = indentation(checker.source(), stmt) {
                     diagnostic.try_set_fix(|| {
                         format_import_from(stmt, indent, checker.locator(), checker.stylist())
                             .map(|content| Edit::range_replacement(content, stmt.range()))
                             .map(Fix::safe_edit)
                     });
                 }
-                checker.diagnostics.push(diagnostic);
+                checker.report_diagnostic(diagnostic);
             }
         }
         _ => (),

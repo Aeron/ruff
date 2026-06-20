@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_python_formatter/tests/fixtures.rs
 input_file: crates/ruff_python_formatter/resources/test/fixtures/ruff/skip_magic_trailing_comma.py
+snapshot_kind: text
 ---
 ## Input
 ```python
@@ -42,12 +43,17 @@ with (a,):  # magic trailing comma
 ## Outputs
 ### Output 1
 ```
-indent-style            = space
-line-width              = 88
-indent-width            = 4
-quote-style             = Double
-magic-trailing-comma    = Respect
-preview                 = Disabled
+indent-style               = space
+line-width                 = 88
+indent-width               = 4
+quote-style                = Double
+line-ending                = LineFeed
+magic-trailing-comma       = Respect
+docstring-code             = Disabled
+docstring-code-line-width  = "dynamic"
+preview                    = Disabled
+target_version             = Py39
+source_type                = Python
 ```
 
 ```python
@@ -95,12 +101,17 @@ with (
 
 ### Output 2
 ```
-indent-style            = space
-line-width              = 88
-indent-width            = 4
-quote-style             = Double
-magic-trailing-comma    = Ignore
-preview                 = Disabled
+indent-style               = space
+line-width                 = 88
+indent-width               = 4
+quote-style                = Double
+line-ending                = LineFeed
+magic-trailing-comma       = Ignore
+docstring-code             = Disabled
+docstring-code-line-width  = "dynamic"
+preview                    = Disabled
+target_version             = Py39
+source_type                = Python
 ```
 
 ```python
@@ -136,6 +147,3 @@ x2 = lambda y,: 1
 with a:  # magic trailing comma
     ...
 ```
-
-
-

@@ -1,6 +1,6 @@
 use ruff_diagnostics::Diagnostic;
 use ruff_diagnostics::{AlwaysFixableViolation, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr};
 use ruff_text_size::Ranged;
 
@@ -27,40 +27,29 @@ use crate::fix::edits::{remove_argument, Parentheses};
 ///
 /// ## References
 /// - [Python documentation: `range`](https://docs.python.org/3/library/stdtypes.html#range)
-#[violation]
-pub struct UnnecessaryRangeStart;
+#[derive(ViolationMetadata)]
+pub(crate) struct UnnecessaryRangeStart;
 
 impl AlwaysFixableViolation for UnnecessaryRangeStart {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Unnecessary `start` argument in `range`")
+        "Unnecessary `start` argument in `range`".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Remove `start` argument")
+        "Remove `start` argument".to_string()
     }
 }
 
 /// PIE808
-pub(crate) fn unnecessary_range_start(checker: &mut Checker, call: &ast::ExprCall) {
-    // Verify that the call is to the `range` builtin.
-    let Expr::Name(ast::ExprName { id, .. }) = call.func.as_ref() else {
-        return;
-    };
-    if id != "range" {
-        return;
-    };
-    if !checker.semantic().is_builtin("range") {
-        return;
-    };
-
+pub(crate) fn unnecessary_range_start(checker: &Checker, call: &ast::ExprCall) {
     // `range` doesn't accept keyword arguments.
     if !call.arguments.keywords.is_empty() {
         return;
     }
 
     // Verify that the call has exactly two arguments (no `step`).
-    let [start, _] = call.arguments.args.as_slice() else {
+    let [start, _] = &*call.arguments.args else {
         return;
     };
 
@@ -76,6 +65,11 @@ pub(crate) fn unnecessary_range_start(checker: &mut Checker, call: &ast::ExprCal
         return;
     };
 
+    // Verify that the call is to the `range` builtin.
+    if !checker.semantic().match_builtin_expr(&call.func, "range") {
+        return;
+    };
+
     let mut diagnostic = Diagnostic::new(UnnecessaryRangeStart, start.range());
     diagnostic.try_set_fix(|| {
         remove_argument(
@@ -86,5 +80,5 @@ pub(crate) fn unnecessary_range_start(checker: &mut Checker, call: &ast::ExprCal
         )
         .map(Fix::safe_edit)
     });
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

@@ -1,35 +1,7 @@
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash, is_macro::Is)]
-pub enum Quote {
-    Single,
-    Double,
-}
-
-impl Quote {
-    #[inline]
-    #[must_use]
-    pub const fn swap(self) -> Self {
-        match self {
-            Quote::Single => Quote::Double,
-            Quote::Double => Quote::Single,
-        }
-    }
-
-    #[inline]
-    pub const fn to_byte(&self) -> u8 {
-        match self {
-            Quote::Single => b'\'',
-            Quote::Double => b'"',
-        }
-    }
-
-    #[inline]
-    pub const fn to_char(&self) -> char {
-        match self {
-            Quote::Single => '\'',
-            Quote::Double => '"',
-        }
-    }
-}
+use ruff_python_ast::{
+    str::{Quote, TripleQuotes},
+    BytesLiteralFlags, StringFlags, StringLiteralFlags,
+};
 
 pub struct EscapeLayout {
     pub quote: Quote,
@@ -69,7 +41,7 @@ pub(crate) const fn choose_quote(
     // always use primary unless we have primary but no secondary
     let use_secondary = primary_count > 0 && secondary_count == 0;
     if use_secondary {
-        (preferred_quote.swap(), secondary_count)
+        (preferred_quote.opposite(), secondary_count)
     } else {
         (preferred_quote, primary_count)
     }
@@ -82,11 +54,6 @@ pub struct UnicodeEscape<'a> {
 
 impl<'a> UnicodeEscape<'a> {
     #[inline]
-    pub fn with_forced_quote(source: &'a str, quote: Quote) -> Self {
-        let layout = EscapeLayout { quote, len: None };
-        Self { source, layout }
-    }
-    #[inline]
     pub fn with_preferred_quote(source: &'a str, quote: Quote) -> Self {
         let layout = Self::repr_layout(source, quote);
         Self { source, layout }
@@ -96,23 +63,32 @@ impl<'a> UnicodeEscape<'a> {
         Self::with_preferred_quote(source, Quote::Single)
     }
     #[inline]
-    pub fn str_repr<'r>(&'a self) -> StrRepr<'r, 'a> {
-        StrRepr(self)
+    pub fn str_repr<'r>(&'a self, triple_quotes: TripleQuotes) -> StrRepr<'r, 'a> {
+        StrRepr {
+            escape: self,
+            triple_quotes,
+        }
     }
 }
 
-pub struct StrRepr<'r, 'a>(&'r UnicodeEscape<'a>);
+pub struct StrRepr<'r, 'a> {
+    escape: &'r UnicodeEscape<'a>,
+    triple_quotes: TripleQuotes,
+}
 
 impl StrRepr<'_, '_> {
     pub fn write(&self, formatter: &mut impl std::fmt::Write) -> std::fmt::Result {
-        let quote = self.0.layout().quote.to_char();
-        formatter.write_char(quote)?;
-        self.0.write_body(formatter)?;
-        formatter.write_char(quote)
+        let flags = StringLiteralFlags::empty()
+            .with_quote_style(self.escape.layout().quote)
+            .with_triple_quotes(self.triple_quotes);
+        formatter.write_str(flags.quote_str())?;
+        self.escape.write_body(formatter)?;
+        formatter.write_str(flags.quote_str())?;
+        Ok(())
     }
 
     pub fn to_string(&self) -> Option<String> {
-        let mut s = String::with_capacity(self.0.layout().len?);
+        let mut s = String::with_capacity(self.escape.layout().len?);
         self.write(&mut s).unwrap();
         Some(s)
     }
@@ -216,7 +192,7 @@ impl UnicodeEscape<'_> {
             // unicodedata lookup just for ascii characters
             '\x20'..='\x7e' => {
                 // printable ascii range
-                if ch == quote.to_char() || ch == '\\' {
+                if ch == quote.as_char() || ch == '\\' {
                     formatter.write_char('\\')?;
                 }
                 formatter.write_char(ch)
@@ -238,7 +214,7 @@ impl UnicodeEscape<'_> {
     }
 }
 
-impl<'a> Escape for UnicodeEscape<'a> {
+impl Escape for UnicodeEscape<'_> {
     fn source_len(&self) -> usize {
         self.source.len()
     }
@@ -260,24 +236,6 @@ impl<'a> Escape for UnicodeEscape<'a> {
     }
 }
 
-#[cfg(test)]
-mod unicode_escape_tests {
-    use super::*;
-
-    #[test]
-    fn changed() {
-        fn test(s: &str) -> bool {
-            UnicodeEscape::new_repr(s).changed()
-        }
-        assert!(!test("hello"));
-        assert!(!test("'hello'"));
-        assert!(!test("\"hello\""));
-
-        assert!(test("'\"hello"));
-        assert!(test("hello\n"));
-    }
-}
-
 pub struct AsciiEscape<'a> {
     source: &'a [u8],
     layout: EscapeLayout,
@@ -286,11 +244,6 @@ pub struct AsciiEscape<'a> {
 impl<'a> AsciiEscape<'a> {
     #[inline]
     pub fn new(source: &'a [u8], layout: EscapeLayout) -> Self {
-        Self { source, layout }
-    }
-    #[inline]
-    pub fn with_forced_quote(source: &'a [u8], quote: Quote) -> Self {
-        let layout = EscapeLayout { quote, len: None };
         Self { source, layout }
     }
     #[inline]
@@ -303,8 +256,11 @@ impl<'a> AsciiEscape<'a> {
         Self::with_preferred_quote(source, Quote::Single)
     }
     #[inline]
-    pub fn bytes_repr<'r>(&'a self) -> BytesRepr<'r, 'a> {
-        BytesRepr(self)
+    pub fn bytes_repr<'r>(&'a self, triple_quotes: TripleQuotes) -> BytesRepr<'r, 'a> {
+        BytesRepr {
+            escape: self,
+            triple_quotes,
+        }
     }
 }
 
@@ -316,17 +272,6 @@ impl AsciiEscape<'_> {
     )]
     pub fn repr_layout(source: &[u8], preferred_quote: Quote) -> EscapeLayout {
         Self::output_layout_with_checker(source, preferred_quote, 3, |a, b| {
-            Some((a as isize).checked_add(b as isize)? as usize)
-        })
-    }
-
-    #[allow(
-        clippy::cast_possible_wrap,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    pub fn named_repr_layout(source: &[u8], name: &str) -> EscapeLayout {
-        Self::output_layout_with_checker(source, Quote::Single, name.len() + 2 + 3, |a, b| {
             Some((a as isize).checked_add(b as isize)? as usize)
         })
     }
@@ -397,7 +342,7 @@ impl AsciiEscape<'_> {
             b'\r' => formatter.write_str("\\r"),
             0x20..=0x7e => {
                 // printable ascii range
-                if ch == quote.to_byte() || ch == b'\\' {
+                if ch == quote.as_byte() || ch == b'\\' {
                     formatter.write_char('\\')?;
                 }
                 formatter.write_char(ch as char)
@@ -407,7 +352,7 @@ impl AsciiEscape<'_> {
     }
 }
 
-impl<'a> Escape for AsciiEscape<'a> {
+impl Escape for AsciiEscape<'_> {
     fn source_len(&self) -> usize {
         self.source.len()
     }
@@ -415,12 +360,10 @@ impl<'a> Escape for AsciiEscape<'a> {
     fn layout(&self) -> &EscapeLayout {
         &self.layout
     }
-    #[allow(unsafe_code)]
     fn write_source(&self, formatter: &mut impl std::fmt::Write) -> std::fmt::Result {
-        formatter.write_str(unsafe {
-            // SAFETY: this function must be called only when source is printable ascii characters
-            std::str::from_utf8_unchecked(self.source)
-        })
+        // OK because function must be called only when source is printable ascii characters.
+        let string = std::str::from_utf8(self.source).expect("ASCII bytes");
+        formatter.write_str(string)
     }
 
     #[cold]
@@ -432,19 +375,26 @@ impl<'a> Escape for AsciiEscape<'a> {
     }
 }
 
-pub struct BytesRepr<'r, 'a>(&'r AsciiEscape<'a>);
+pub struct BytesRepr<'r, 'a> {
+    escape: &'r AsciiEscape<'a>,
+    triple_quotes: TripleQuotes,
+}
 
 impl BytesRepr<'_, '_> {
     pub fn write(&self, formatter: &mut impl std::fmt::Write) -> std::fmt::Result {
-        let quote = self.0.layout().quote.to_char();
+        let flags = BytesLiteralFlags::empty()
+            .with_quote_style(self.escape.layout().quote)
+            .with_triple_quotes(self.triple_quotes);
+
         formatter.write_char('b')?;
-        formatter.write_char(quote)?;
-        self.0.write_body(formatter)?;
-        formatter.write_char(quote)
+        formatter.write_str(flags.quote_str())?;
+        self.escape.write_body(formatter)?;
+        formatter.write_str(flags.quote_str())?;
+        Ok(())
     }
 
     pub fn to_string(&self) -> Option<String> {
-        let mut s = String::with_capacity(self.0.layout().len?);
+        let mut s = String::with_capacity(self.escape.layout().len?);
         self.write(&mut s).unwrap();
         Some(s)
     }
@@ -453,5 +403,23 @@ impl BytesRepr<'_, '_> {
 impl std::fmt::Display for BytesRepr<'_, '_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.write(formatter)
+    }
+}
+
+#[cfg(test)]
+mod unicode_escape_tests {
+    use super::*;
+
+    #[test]
+    fn changed() {
+        fn test(s: &str) -> bool {
+            UnicodeEscape::new_repr(s).changed()
+        }
+        assert!(!test("hello"));
+        assert!(!test("'hello'"));
+        assert!(!test("\"hello\""));
+
+        assert!(test("'\"hello"));
+        assert!(test("hello\n"));
     }
 }

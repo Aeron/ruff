@@ -1,11 +1,11 @@
-use ruff_text_size::{TextLen, TextRange, TextSize};
-
 use ruff_diagnostics::AlwaysFixableViolation;
 use ruff_diagnostics::Edit;
 use ruff_diagnostics::{Diagnostic, DiagnosticKind, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_parser::Tok;
-use ruff_source_file::Locator;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_parser::TokenKind;
+use ruff_text_size::{TextLen, TextRange, TextSize};
+
+use crate::Locator;
 
 /// ## What it does
 /// Checks for strings that contain the control character `BS`.
@@ -26,13 +26,13 @@ use ruff_source_file::Locator;
 /// ```python
 /// x = "\b"
 /// ```
-#[violation]
-pub struct InvalidCharacterBackspace;
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidCharacterBackspace;
 
 impl AlwaysFixableViolation for InvalidCharacterBackspace {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Invalid unescaped character backspace, use \"\\b\" instead")
+        "Invalid unescaped character backspace, use \"\\b\" instead".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -57,15 +57,15 @@ impl AlwaysFixableViolation for InvalidCharacterBackspace {
 ///
 /// Use instead:
 /// ```python
-/// x = "\x1A"
+/// x = "\x1a"
 /// ```
-#[violation]
-pub struct InvalidCharacterSub;
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidCharacterSub;
 
 impl AlwaysFixableViolation for InvalidCharacterSub {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Invalid unescaped character SUB, use \"\\x1A\" instead")
+        "Invalid unescaped character SUB, use \"\\x1A\" instead".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -90,15 +90,15 @@ impl AlwaysFixableViolation for InvalidCharacterSub {
 ///
 /// Use instead:
 /// ```python
-/// x = "\x1B"
+/// x = "\x1b"
 /// ```
-#[violation]
-pub struct InvalidCharacterEsc;
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidCharacterEsc;
 
 impl AlwaysFixableViolation for InvalidCharacterEsc {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Invalid unescaped character ESC, use \"\\x1B\" instead")
+        "Invalid unescaped character ESC, use \"\\x1B\" instead".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -125,13 +125,13 @@ impl AlwaysFixableViolation for InvalidCharacterEsc {
 /// ```python
 /// x = "\0"
 /// ```
-#[violation]
-pub struct InvalidCharacterNul;
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidCharacterNul;
 
 impl AlwaysFixableViolation for InvalidCharacterNul {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Invalid unescaped character NUL, use \"\\0\" instead")
+        "Invalid unescaped character NUL, use \"\\0\" instead".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -155,15 +155,15 @@ impl AlwaysFixableViolation for InvalidCharacterNul {
 ///
 /// Use instead:
 /// ```python
-/// x = "Dear Sir\u200B/\u200BMadam"  # zero width space
+/// x = "Dear Sir\u200b/\u200bMadam"  # zero width space
 /// ```
-#[violation]
-pub struct InvalidCharacterZeroWidthSpace;
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidCharacterZeroWidthSpace;
 
 impl AlwaysFixableViolation for InvalidCharacterZeroWidthSpace {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Invalid unescaped character zero-width-space, use \"\\u200B\" instead")
+        "Invalid unescaped character zero-width-space, use \"\\u200B\" instead".to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -174,14 +174,14 @@ impl AlwaysFixableViolation for InvalidCharacterZeroWidthSpace {
 /// PLE2510, PLE2512, PLE2513, PLE2514, PLE2515
 pub(crate) fn invalid_string_characters(
     diagnostics: &mut Vec<Diagnostic>,
-    tok: &Tok,
+    token: TokenKind,
     range: TextRange,
     locator: &Locator,
 ) {
-    let text = match tok {
+    let text = match token {
         // We can't use the `value` field since it's decoded and e.g. for f-strings removed a curly
         // brace that escaped another curly brace, which would gives us wrong column information.
-        Tok::String { .. } | Tok::FStringMiddle { .. } => locator.slice(range),
+        TokenKind::String | TokenKind::FStringMiddle => locator.slice(range),
         _ => return,
     };
 

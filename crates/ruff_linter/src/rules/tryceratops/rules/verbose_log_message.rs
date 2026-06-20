@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, ExceptHandler, Expr};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_stdlib::logging::LoggingLevel;
@@ -33,33 +33,18 @@ use crate::rules::tryceratops::helpers::LoggerCandidateVisitor;
 /// except ValueError:
 ///     logger.exception("Found an error")
 /// ```
-#[violation]
-pub struct VerboseLogMessage;
+#[derive(ViolationMetadata)]
+pub(crate) struct VerboseLogMessage;
 
 impl Violation for VerboseLogMessage {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Redundant exception object included in `logging.exception` call")
-    }
-}
-
-#[derive(Default)]
-struct NameVisitor<'a> {
-    names: Vec<&'a ast::ExprName>,
-}
-
-impl<'a> Visitor<'a> for NameVisitor<'a> {
-    fn visit_expr(&mut self, expr: &'a Expr) {
-        match expr {
-            Expr::Name(name) if name.ctx.is_load() => self.names.push(name),
-            Expr::Attribute(_) => {}
-            _ => visitor::walk_expr(self, expr),
-        }
+        "Redundant exception object included in `logging.exception` call".to_string()
     }
 }
 
 /// TRY401
-pub(crate) fn verbose_log_message(checker: &mut Checker, handlers: &[ExceptHandler]) {
+pub(crate) fn verbose_log_message(checker: &Checker, handlers: &[ExceptHandler]) {
     for handler in handlers {
         let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler { body, .. }) = handler;
 
@@ -75,13 +60,15 @@ pub(crate) fn verbose_log_message(checker: &mut Checker, handlers: &[ExceptHandl
             if matches!(logging_level, LoggingLevel::Exception) {
                 // Collect all referenced names in the `logging.exception` call.
                 let names: Vec<&ast::ExprName> = {
-                    let mut names = Vec::new();
-                    for arg in &expr.arguments.args {
-                        let mut visitor = NameVisitor::default();
-                        visitor.visit_expr(arg);
-                        names.extend(visitor.names);
-                    }
-                    names
+                    expr.arguments
+                        .args
+                        .iter()
+                        .flat_map(|arg| {
+                            let mut visitor = NameVisitor::default();
+                            visitor.visit_expr(arg);
+                            visitor.names
+                        })
+                        .collect()
                 };
 
                 // Find any bound exceptions in the call.
@@ -91,12 +78,25 @@ pub(crate) fn verbose_log_message(checker: &mut Checker, handlers: &[ExceptHandl
                     };
                     let binding = checker.semantic().binding(id);
                     if binding.kind.is_bound_exception() {
-                        checker
-                            .diagnostics
-                            .push(Diagnostic::new(VerboseLogMessage, expr.range()));
+                        checker.report_diagnostic(Diagnostic::new(VerboseLogMessage, expr.range()));
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Default)]
+struct NameVisitor<'a> {
+    names: Vec<&'a ast::ExprName>,
+}
+
+impl<'a> Visitor<'a> for NameVisitor<'a> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Name(name) if name.ctx.is_load() => self.names.push(name),
+            Expr::Attribute(_) => {}
+            _ => visitor::walk_expr(self, expr),
         }
     }
 }

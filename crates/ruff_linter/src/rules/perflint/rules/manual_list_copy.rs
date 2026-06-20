@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::any_over_expr;
 use ruff_python_ast::{self as ast, Arguments, Expr, Stmt};
 use ruff_python_semantic::analyze::typing::is_list;
@@ -34,23 +34,27 @@ use crate::checkers::ast::Checker;
 /// original = list(range(10000))
 /// filtered = list(original)
 /// ```
-#[violation]
-pub struct ManualListCopy;
+#[derive(ViolationMetadata)]
+pub(crate) struct ManualListCopy;
 
 impl Violation for ManualListCopy {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `list` or `list.copy` to create a copy of a list")
+        "Use `list` or `list.copy` to create a copy of a list".to_string()
     }
 }
 
 /// PERF402
-pub(crate) fn manual_list_copy(checker: &mut Checker, target: &Expr, body: &[Stmt]) {
-    let Expr::Name(ast::ExprName { id, .. }) = target else {
+pub(crate) fn manual_list_copy(checker: &Checker, for_stmt: &ast::StmtFor) {
+    if for_stmt.is_async {
+        return;
+    }
+
+    let Expr::Name(ast::ExprName { id, .. }) = &*for_stmt.target else {
         return;
     };
 
-    let [stmt] = body else {
+    let [stmt] = &*for_stmt.body else {
         return;
     };
 
@@ -76,7 +80,7 @@ pub(crate) fn manual_list_copy(checker: &mut Checker, target: &Expr, body: &[Stm
         return;
     }
 
-    let [arg] = args.as_slice() else {
+    let [arg] = &**args else {
         return;
     };
 
@@ -115,7 +119,5 @@ pub(crate) fn manual_list_copy(checker: &mut Checker, target: &Expr, body: &[Stm
         return;
     }
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(ManualListCopy, *range));
+    checker.report_diagnostic(Diagnostic::new(ManualListCopy, *range));
 }

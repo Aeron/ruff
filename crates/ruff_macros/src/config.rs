@@ -48,10 +48,10 @@ pub(crate) fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream> {
                         for token in list.tokens.clone() {
                             if let TokenTree::Ident(ident) = token {
                                 if ident == "flatten" {
-                                    let ty_name = ty.path.require_ident()?;
                                     output.push(quote_spanned!(
-                                        ident.span() => (#ty_name::record(visit))
+                                        ty.span() => (<#ty>::record(visit))
                                     ));
+
                                     break;
                                 }
                             }
@@ -60,15 +60,13 @@ pub(crate) fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream> {
                 }
             }
 
-            let docs: Vec<&Attribute> = struct_attributes
+            let docs = struct_attributes
                 .iter()
-                .filter(|attr| attr.path().is_ident("doc"))
-                .collect();
+                .filter(|attr| attr.path().is_ident("doc"));
 
             // Convert the list of `doc` attributes into a single string.
             let doc = dedent(
                 &docs
-                    .into_iter()
                     .map(parse_doc)
                     .collect::<syn::Result<Vec<_>>>()?
                     .join("\n"),

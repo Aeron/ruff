@@ -16,6 +16,9 @@
 //! have the same shape in that they evaluate to the same value.
 
 use crate as ast;
+use crate::{Expr, Number};
+use std::borrow::Cow;
+use std::hash::Hash;
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum ComparableBoolOp {
@@ -510,6 +513,52 @@ impl<'a> From<&'a ast::ExceptHandler> for ComparableExceptHandler<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+pub enum ComparableFStringElement<'a> {
+    Literal(Cow<'a, str>),
+    FStringExpressionElement(FStringExpressionElement<'a>),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct FStringExpressionElement<'a> {
+    expression: ComparableExpr<'a>,
+    debug_text: Option<&'a ast::DebugText>,
+    conversion: ast::ConversionFlag,
+    format_spec: Option<Vec<ComparableFStringElement<'a>>>,
+}
+
+impl<'a> From<&'a ast::FStringElement> for ComparableFStringElement<'a> {
+    fn from(fstring_element: &'a ast::FStringElement) -> Self {
+        match fstring_element {
+            ast::FStringElement::Literal(ast::FStringLiteralElement { value, .. }) => {
+                Self::Literal(value.as_ref().into())
+            }
+            ast::FStringElement::Expression(formatted_value) => formatted_value.into(),
+        }
+    }
+}
+
+impl<'a> From<&'a ast::FStringExpressionElement> for ComparableFStringElement<'a> {
+    fn from(fstring_expression_element: &'a ast::FStringExpressionElement) -> Self {
+        let ast::FStringExpressionElement {
+            expression,
+            debug_text,
+            conversion,
+            format_spec,
+            range: _,
+        } = fstring_expression_element;
+
+        Self::FStringExpressionElement(FStringExpressionElement {
+            expression: (expression).into(),
+            debug_text: debug_text.as_ref(),
+            conversion: *conversion,
+            format_spec: format_spec
+                .as_ref()
+                .map(|spec| spec.elements.iter().map(Into::into).collect()),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ComparableElifElseClause<'a> {
     test: Option<ComparableExpr<'a>>,
     body: Vec<ComparableStmt<'a>>,
@@ -530,13 +579,152 @@ impl<'a> From<&'a ast::ElifElseClause> for ComparableElifElseClause<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+pub enum ComparableLiteral<'a> {
+    None,
+    Ellipsis,
+    Bool(&'a bool),
+    Str(Vec<ComparableStringLiteral<'a>>),
+    Bytes(Vec<ComparableBytesLiteral<'a>>),
+    Number(ComparableNumber<'a>),
+}
+
+impl<'a> From<ast::LiteralExpressionRef<'a>> for ComparableLiteral<'a> {
+    fn from(literal: ast::LiteralExpressionRef<'a>) -> Self {
+        match literal {
+            ast::LiteralExpressionRef::NoneLiteral(_) => Self::None,
+            ast::LiteralExpressionRef::EllipsisLiteral(_) => Self::Ellipsis,
+            ast::LiteralExpressionRef::BooleanLiteral(ast::ExprBooleanLiteral {
+                value, ..
+            }) => Self::Bool(value),
+            ast::LiteralExpressionRef::StringLiteral(ast::ExprStringLiteral { value, .. }) => {
+                Self::Str(value.iter().map(Into::into).collect())
+            }
+            ast::LiteralExpressionRef::BytesLiteral(ast::ExprBytesLiteral { value, .. }) => {
+                Self::Bytes(value.iter().map(Into::into).collect())
+            }
+            ast::LiteralExpressionRef::NumberLiteral(ast::ExprNumberLiteral { value, .. }) => {
+                Self::Number(value.into())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ComparableFString<'a> {
+    elements: Box<[ComparableFStringElement<'a>]>,
+}
+
+impl<'a> From<&'a ast::FStringValue> for ComparableFString<'a> {
+    // The approach below is somewhat complicated, so it may
+    // require some justification.
+    //
+    // Suppose given an f-string of the form
+    // `f"{foo!r} one" " and two " f" and three {bar!s}"`
+    // This decomposes as:
+    // - An `FStringPart::FString`, `f"{foo!r} one"` with elements
+    //      - `FStringElement::Expression` encoding `{foo!r}`
+    //      - `FStringElement::Literal` encoding " one"
+    // - An `FStringPart::Literal` capturing `" and two "`
+    // - An `FStringPart::FString`, `f" and three {bar!s}"` with elements
+    //      - `FStringElement::Literal` encoding " and three "
+    //      - `FStringElement::Expression` encoding `{bar!s}`
+    //
+    // We would like to extract from this a vector of (comparable) f-string
+    // _elements_ which alternate between expression elements and literal
+    // elements. In order to do so, we need to concatenate adjacent string
+    // literals. String literals may be separated for two reasons: either
+    // they appear in adjacent string literal parts, or else a string literal
+    // part is adjacent to a string literal _element_ inside of an f-string part.
+    fn from(value: &'a ast::FStringValue) -> Self {
+        #[derive(Default)]
+        struct Collector<'a> {
+            elements: Vec<ComparableFStringElement<'a>>,
+        }
+
+        impl<'a> Collector<'a> {
+            // The logic for concatenating adjacent string literals
+            // occurs here, implicitly: when we encounter a sequence
+            // of string literals, the first gets pushed to the
+            // `elements` vector, while subsequent strings
+            // are concatenated onto this top string.
+            fn push_literal(&mut self, literal: &'a str) {
+                if let Some(ComparableFStringElement::Literal(existing_literal)) =
+                    self.elements.last_mut()
+                {
+                    existing_literal.to_mut().push_str(literal);
+                } else {
+                    self.elements
+                        .push(ComparableFStringElement::Literal(literal.into()));
+                }
+            }
+
+            fn push_expression(&mut self, expression: &'a ast::FStringExpressionElement) {
+                self.elements.push(expression.into());
+            }
+        }
+
+        let mut collector = Collector::default();
+
+        for part in value {
+            match part {
+                ast::FStringPart::Literal(string_literal) => {
+                    collector.push_literal(&string_literal.value);
+                }
+                ast::FStringPart::FString(fstring) => {
+                    for element in &fstring.elements {
+                        match element {
+                            ast::FStringElement::Literal(literal) => {
+                                collector.push_literal(&literal.value);
+                            }
+                            ast::FStringElement::Expression(expression) => {
+                                collector.push_expression(expression);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            elements: collector.elements.into_boxed_slice(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ComparableStringLiteral<'a> {
+    value: &'a str,
+}
+
+impl<'a> From<&'a ast::StringLiteral> for ComparableStringLiteral<'a> {
+    fn from(string_literal: &'a ast::StringLiteral) -> Self {
+        Self {
+            value: &string_literal.value,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ComparableBytesLiteral<'a> {
+    value: Cow<'a, [u8]>,
+}
+
+impl<'a> From<&'a ast::BytesLiteral> for ComparableBytesLiteral<'a> {
+    fn from(bytes_literal: &'a ast::BytesLiteral) -> Self {
+        Self {
+            value: Cow::Borrowed(&bytes_literal.value),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ExprBoolOp<'a> {
     op: ComparableBoolOp,
     values: Vec<ComparableExpr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct ExprNamedExpr<'a> {
+pub struct ExprNamed<'a> {
     target: Box<ComparableExpr<'a>>,
     value: Box<ComparableExpr<'a>>,
 }
@@ -561,16 +749,30 @@ pub struct ExprLambda<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct ExprIfExp<'a> {
+pub struct ExprIf<'a> {
     test: Box<ComparableExpr<'a>>,
     body: Box<ComparableExpr<'a>>,
     orelse: Box<ComparableExpr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ComparableDictItem<'a> {
+    key: Option<ComparableExpr<'a>>,
+    value: ComparableExpr<'a>,
+}
+
+impl<'a> From<&'a ast::DictItem> for ComparableDictItem<'a> {
+    fn from(ast::DictItem { key, value }: &'a ast::DictItem) -> Self {
+        Self {
+            key: key.as_ref().map(ComparableExpr::from),
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ExprDict<'a> {
-    keys: Vec<Option<ComparableExpr<'a>>>,
-    values: Vec<ComparableExpr<'a>>,
+    items: Vec<ComparableDictItem<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -598,7 +800,7 @@ pub struct ExprDictComp<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct ExprGeneratorExp<'a> {
+pub struct ExprGenerator<'a> {
     elt: Box<ComparableExpr<'a>>,
     generators: Vec<ComparableComprehension<'a>>,
 }
@@ -632,57 +834,26 @@ pub struct ExprCall<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct ExprFormattedValue<'a> {
+pub struct ExprFStringExpressionElement<'a> {
     value: Box<ComparableExpr<'a>>,
     debug_text: Option<&'a ast::DebugText>,
     conversion: ast::ConversionFlag,
-    format_spec: Option<Box<ComparableExpr<'a>>>,
+    format_spec: Vec<ComparableFStringElement<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ExprFString<'a> {
-    values: Vec<ComparableExpr<'a>>,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub enum ComparableLiteral<'a> {
-    None,
-    Ellipsis,
-    Bool(&'a bool),
-    Str(&'a str),
-    Bytes(&'a [u8]),
-    Number(ComparableNumber<'a>),
-}
-
-impl<'a> From<ast::LiteralExpressionRef<'a>> for ComparableLiteral<'a> {
-    fn from(literal: ast::LiteralExpressionRef<'a>) -> Self {
-        match literal {
-            ast::LiteralExpressionRef::NoneLiteral(_) => Self::None,
-            ast::LiteralExpressionRef::EllipsisLiteral(_) => Self::Ellipsis,
-            ast::LiteralExpressionRef::BooleanLiteral(ast::ExprBooleanLiteral {
-                value, ..
-            }) => Self::Bool(value),
-            ast::LiteralExpressionRef::StringLiteral(ast::ExprStringLiteral { value, .. }) => {
-                Self::Str(value)
-            }
-            ast::LiteralExpressionRef::BytesLiteral(ast::ExprBytesLiteral { value, .. }) => {
-                Self::Bytes(value)
-            }
-            ast::LiteralExpressionRef::NumberLiteral(ast::ExprNumberLiteral { value, .. }) => {
-                Self::Number(value.into())
-            }
-        }
-    }
+    value: ComparableFString<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ExprStringLiteral<'a> {
-    value: &'a str,
+    value: ComparableStringLiteral<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ExprBytesLiteral<'a> {
-    value: &'a [u8],
+    value: ComparableBytesLiteral<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -691,8 +862,8 @@ pub struct ExprNumberLiteral<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct ExprBoolLiteral<'a> {
-    value: &'a bool,
+pub struct ExprBoolLiteral {
+    value: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -743,30 +914,30 @@ pub struct ExprIpyEscapeCommand<'a> {
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ComparableExpr<'a> {
     BoolOp(ExprBoolOp<'a>),
-    NamedExpr(ExprNamedExpr<'a>),
+    NamedExpr(ExprNamed<'a>),
     BinOp(ExprBinOp<'a>),
     UnaryOp(ExprUnaryOp<'a>),
     Lambda(ExprLambda<'a>),
-    IfExp(ExprIfExp<'a>),
+    IfExp(ExprIf<'a>),
     Dict(ExprDict<'a>),
     Set(ExprSet<'a>),
     ListComp(ExprListComp<'a>),
     SetComp(ExprSetComp<'a>),
     DictComp(ExprDictComp<'a>),
-    GeneratorExp(ExprGeneratorExp<'a>),
+    GeneratorExp(ExprGenerator<'a>),
     Await(ExprAwait<'a>),
     Yield(ExprYield<'a>),
     YieldFrom(ExprYieldFrom<'a>),
     Compare(ExprCompare<'a>),
     Call(ExprCall<'a>),
-    FormattedValue(ExprFormattedValue<'a>),
+    FStringExpressionElement(ExprFStringExpressionElement<'a>),
     FString(ExprFString<'a>),
     StringLiteral(ExprStringLiteral<'a>),
     BytesLiteral(ExprBytesLiteral<'a>),
     NumberLiteral(ExprNumberLiteral<'a>),
-    BoolLiteral(ExprBoolLiteral<'a>),
+    BoolLiteral(ExprBoolLiteral),
     NoneLiteral,
-    EllispsisLiteral,
+    EllipsisLiteral,
     Attribute(ExprAttribute<'a>),
     Subscript(ExprSubscript<'a>),
     Starred(ExprStarred<'a>),
@@ -800,11 +971,11 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 op: (*op).into(),
                 values: values.iter().map(Into::into).collect(),
             }),
-            ast::Expr::NamedExpr(ast::ExprNamedExpr {
+            ast::Expr::Named(ast::ExprNamed {
                 target,
                 value,
                 range: _,
-            }) => Self::NamedExpr(ExprNamedExpr {
+            }) => Self::NamedExpr(ExprNamed {
                 target: target.into(),
                 value: value.into(),
             }),
@@ -834,26 +1005,18 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 parameters: parameters.as_ref().map(Into::into),
                 body: body.into(),
             }),
-            ast::Expr::IfExp(ast::ExprIfExp {
+            ast::Expr::If(ast::ExprIf {
                 test,
                 body,
                 orelse,
                 range: _,
-            }) => Self::IfExp(ExprIfExp {
+            }) => Self::IfExp(ExprIf {
                 test: test.into(),
                 body: body.into(),
                 orelse: orelse.into(),
             }),
-            ast::Expr::Dict(ast::ExprDict {
-                keys,
-                values,
-                range: _,
-            }) => Self::Dict(ExprDict {
-                keys: keys
-                    .iter()
-                    .map(|expr| expr.as_ref().map(Into::into))
-                    .collect(),
-                values: values.iter().map(Into::into).collect(),
+            ast::Expr::Dict(ast::ExprDict { items, range: _ }) => Self::Dict(ExprDict {
+                items: items.iter().map(ComparableDictItem::from).collect(),
             }),
             ast::Expr::Set(ast::ExprSet { elts, range: _ }) => Self::Set(ExprSet {
                 elts: elts.iter().map(Into::into).collect(),
@@ -884,11 +1047,12 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 value: value.into(),
                 generators: generators.iter().map(Into::into).collect(),
             }),
-            ast::Expr::GeneratorExp(ast::ExprGeneratorExp {
+            ast::Expr::Generator(ast::ExprGenerator {
                 elt,
                 generators,
                 range: _,
-            }) => Self::GeneratorExp(ExprGeneratorExp {
+                parenthesized: _,
+            }) => Self::GeneratorExp(ExprGenerator {
                 elt: elt.into(),
                 generators: generators.iter().map(Into::into).collect(),
             }),
@@ -921,50 +1085,35 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 func: func.into(),
                 arguments: arguments.into(),
             }),
-            ast::Expr::FormattedValue(ast::ExprFormattedValue {
-                value,
-                conversion,
-                debug_text,
-                format_spec,
-                range: _,
-            }) => Self::FormattedValue(ExprFormattedValue {
-                value: value.into(),
-                conversion: *conversion,
-                debug_text: debug_text.as_ref(),
-                format_spec: format_spec.as_ref().map(Into::into),
-            }),
-            ast::Expr::FString(ast::ExprFString {
-                values,
-                implicit_concatenated: _,
-                range: _,
-            }) => Self::FString(ExprFString {
-                values: values.iter().map(Into::into).collect(),
-            }),
-            ast::Expr::StringLiteral(ast::ExprStringLiteral {
-                value,
-                // Compare strings based on resolved value, not representation (i.e., ignore whether
-                // the string was implicitly concatenated).
-                implicit_concatenated: _,
-                unicode: _,
-                range: _,
-            }) => Self::StringLiteral(ExprStringLiteral { value }),
-            ast::Expr::BytesLiteral(ast::ExprBytesLiteral {
-                value,
-                // Compare bytes based on resolved value, not representation (i.e., ignore whether
-                // the bytes was implicitly concatenated).
-                implicit_concatenated: _,
-                range: _,
-            }) => Self::BytesLiteral(ExprBytesLiteral { value }),
+            ast::Expr::FString(ast::ExprFString { value, range: _ }) => {
+                Self::FString(ExprFString {
+                    value: value.into(),
+                })
+            }
+            ast::Expr::StringLiteral(ast::ExprStringLiteral { value, range: _ }) => {
+                Self::StringLiteral(ExprStringLiteral {
+                    value: ComparableStringLiteral {
+                        value: value.to_str(),
+                    },
+                })
+            }
+            ast::Expr::BytesLiteral(ast::ExprBytesLiteral { value, range: _ }) => {
+                Self::BytesLiteral(ExprBytesLiteral {
+                    value: ComparableBytesLiteral {
+                        value: Cow::from(value),
+                    },
+                })
+            }
             ast::Expr::NumberLiteral(ast::ExprNumberLiteral { value, range: _ }) => {
                 Self::NumberLiteral(ExprNumberLiteral {
                     value: value.into(),
                 })
             }
             ast::Expr::BooleanLiteral(ast::ExprBooleanLiteral { value, range: _ }) => {
-                Self::BoolLiteral(ExprBoolLiteral { value })
+                Self::BoolLiteral(ExprBoolLiteral { value: *value })
             }
             ast::Expr::NoneLiteral(_) => Self::NoneLiteral,
-            ast::Expr::EllipsisLiteral(_) => Self::EllispsisLiteral,
+            ast::Expr::EllipsisLiteral(_) => Self::EllipsisLiteral,
             ast::Expr::Attribute(ast::ExprAttribute {
                 value,
                 attr,
@@ -1002,6 +1151,7 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 elts,
                 ctx: _,
                 range: _,
+                parenthesized: _,
             }) => Self::Tuple(ExprTuple {
                 elts: elts.iter().map(Into::into).collect(),
             }),
@@ -1019,10 +1169,7 @@ impl<'a> From<&'a ast::Expr> for ComparableExpr<'a> {
                 kind,
                 value,
                 range: _,
-            }) => Self::IpyEscapeCommand(ExprIpyEscapeCommand {
-                kind: *kind,
-                value: value.as_str(),
-            }),
+            }) => Self::IpyEscapeCommand(ExprIpyEscapeCommand { kind: *kind, value }),
         }
     }
 }
@@ -1104,21 +1251,29 @@ impl<'a> From<&'a ast::TypeParam> for ComparableTypeParam<'a> {
             ast::TypeParam::TypeVar(ast::TypeParamTypeVar {
                 name,
                 bound,
+                default,
                 range: _,
             }) => Self::TypeVar(TypeParamTypeVar {
                 name: name.as_str(),
                 bound: bound.as_ref().map(Into::into),
+                default: default.as_ref().map(Into::into),
             }),
-            ast::TypeParam::TypeVarTuple(ast::TypeParamTypeVarTuple { name, range: _ }) => {
-                Self::TypeVarTuple(TypeParamTypeVarTuple {
-                    name: name.as_str(),
-                })
-            }
-            ast::TypeParam::ParamSpec(ast::TypeParamParamSpec { name, range: _ }) => {
-                Self::ParamSpec(TypeParamParamSpec {
-                    name: name.as_str(),
-                })
-            }
+            ast::TypeParam::TypeVarTuple(ast::TypeParamTypeVarTuple {
+                name,
+                default,
+                range: _,
+            }) => Self::TypeVarTuple(TypeParamTypeVarTuple {
+                name: name.as_str(),
+                default: default.as_ref().map(Into::into),
+            }),
+            ast::TypeParam::ParamSpec(ast::TypeParamParamSpec {
+                name,
+                default,
+                range: _,
+            }) => Self::ParamSpec(TypeParamParamSpec {
+                name: name.as_str(),
+                default: default.as_ref().map(Into::into),
+            }),
         }
     }
 }
@@ -1127,16 +1282,19 @@ impl<'a> From<&'a ast::TypeParam> for ComparableTypeParam<'a> {
 pub struct TypeParamTypeVar<'a> {
     pub name: &'a str,
     pub bound: Option<Box<ComparableExpr<'a>>>,
+    pub default: Option<Box<ComparableExpr<'a>>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamParamSpec<'a> {
     pub name: &'a str,
+    pub default: Option<Box<ComparableExpr<'a>>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamTypeVarTuple<'a> {
     pub name: &'a str,
+    pub default: Option<Box<ComparableExpr<'a>>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -1226,7 +1384,7 @@ pub struct StmtImport<'a> {
 pub struct StmtImportFrom<'a> {
     module: Option<&'a str>,
     names: Vec<ComparableAlias<'a>>,
-    level: Option<u32>,
+    level: u32,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -1467,10 +1625,7 @@ impl<'a> From<&'a ast::Stmt> for ComparableStmt<'a> {
                 kind,
                 value,
                 range: _,
-            }) => Self::IpyEscapeCommand(StmtIpyEscapeCommand {
-                kind: *kind,
-                value: value.as_str(),
-            }),
+            }) => Self::IpyEscapeCommand(StmtIpyEscapeCommand { kind: *kind, value }),
             ast::Stmt::Expr(ast::StmtExpr { value, range: _ }) => Self::Expr(StmtExpr {
                 value: value.into(),
             }),
@@ -1519,5 +1674,78 @@ impl<'a> From<&'a ast::ModExpression> for ComparableModExpression<'a> {
         Self {
             body: (&expr.body).into(),
         }
+    }
+}
+
+/// Wrapper around [`Expr`] that implements [`Hash`] and [`PartialEq`] according to Python
+/// semantics:
+///
+/// > Values that compare equal (such as 1, 1.0, and True) can be used interchangeably to index the
+/// > same dictionary entry.
+///
+/// For example, considers `True`, `1`, and `1.0` to be equal, as they hash to the same value
+/// in Python, along with `False`, `0`, and `0.0`.
+///
+/// See: <https://docs.python.org/3/library/stdtypes.html#mapping-types-dict>
+#[derive(Debug)]
+pub struct HashableExpr<'a>(ComparableExpr<'a>);
+
+impl Hash for HashableExpr<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq<Self> for HashableExpr<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for HashableExpr<'_> {}
+
+impl<'a> From<&'a Expr> for HashableExpr<'a> {
+    fn from(expr: &'a Expr) -> Self {
+        /// Returns a version of the given expression that can be hashed and compared according to
+        /// Python  semantics.
+        fn as_hashable(expr: &Expr) -> ComparableExpr {
+            match expr {
+                Expr::Named(named) => ComparableExpr::NamedExpr(ExprNamed {
+                    target: Box::new(ComparableExpr::from(&named.target)),
+                    value: Box::new(as_hashable(&named.value)),
+                }),
+                Expr::NumberLiteral(number) => as_bool(number)
+                    .map(|value| ComparableExpr::BoolLiteral(ExprBoolLiteral { value }))
+                    .unwrap_or_else(|| ComparableExpr::from(expr)),
+                Expr::Tuple(tuple) => ComparableExpr::Tuple(ExprTuple {
+                    elts: tuple.iter().map(as_hashable).collect(),
+                }),
+                _ => ComparableExpr::from(expr),
+            }
+        }
+
+        /// Returns the `bool` value of the given expression, if it has an equivalent hash to
+        /// `True` or `False`.
+        fn as_bool(number: &crate::ExprNumberLiteral) -> Option<bool> {
+            match &number.value {
+                Number::Int(int) => match int.as_u8() {
+                    Some(0) => Some(false),
+                    Some(1) => Some(true),
+                    _ => None,
+                },
+                Number::Float(float) => match float {
+                    0.0 => Some(false),
+                    1.0 => Some(true),
+                    _ => None,
+                },
+                Number::Complex { real, imag } => match (real, imag) {
+                    (0.0, 0.0) => Some(false),
+                    (1.0, 0.0) => Some(true),
+                    _ => None,
+                },
+            }
+        }
+
+        Self(as_hashable(expr))
     }
 }

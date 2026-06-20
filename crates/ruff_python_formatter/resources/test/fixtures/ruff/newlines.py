@@ -249,8 +249,89 @@ if True:
     print()
 
 
+if True:
+    def a():
+        return 1
+else:
+    pass
+
+if True:
+    # fmt: off
+    def a():
+        return 1
+    # fmt: on
+else:
+    pass
+
+match True:
+    case 1:
+        def a():
+            return 1
+    case 1:
+        def a():
+            return 1
+
+try:
+    def a():
+        return 1
+except RuntimeError:
+    def a():
+        return 1
+
+try:
+    def a():
+        return 1
+finally:
+    def a():
+        return 1
+
+try:
+    def a():
+        return 1
+except RuntimeError:
+    def a():
+        return 1
+except ZeroDivisionError:
+    def a():
+        return 1
+else:
+    def a():
+        return 1
+finally:
+    def a():
+        return 1
+
+if raw:
+    def show_file(lines):
+        for line in lines:
+            pass
+            # Trailing comment not on function or class
+
+else:
+    pass
+
+
 # NOTE: Please keep this the last block in this file. This tests that we don't insert
 # empty line(s) at the end of the file due to nested function
 if True:
     def nested_trailing_function():
         pass
+
+
+def overload1(): ...  # trailing comment
+def overload1(a: int): ...
+
+def overload2(): ...  # trailing comment
+
+def overload2(a: int): ...
+
+def overload3():
+    ...
+    # trailing comment
+def overload3(a: int): ...
+
+def overload4():
+    ...
+    # trailing comment
+
+def overload4(a: int): ...

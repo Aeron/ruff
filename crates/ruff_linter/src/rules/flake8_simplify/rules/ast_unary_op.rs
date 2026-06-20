@@ -2,7 +2,8 @@ use ruff_python_ast::{self as ast, Arguments, CmpOp, Expr, ExprContext, Stmt, Un
 use ruff_text_size::{Ranged, TextRange};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::Name;
 use ruff_python_semantic::ScopeKind;
 
 use crate::checkers::ast::Checker;
@@ -24,10 +25,15 @@ use crate::checkers::ast::Checker;
 /// a != b
 /// ```
 ///
+/// ## Fix safety
+/// The fix is marked as unsafe, as it might change the behaviour
+/// if `a` and/or `b` overrides `__eq__`/`__ne__`
+/// in such a manner that they don't return booleans.
+///
 /// ## References
 /// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
-#[violation]
-pub struct NegateEqualOp {
+#[derive(ViolationMetadata)]
+pub(crate) struct NegateEqualOp {
     left: String,
     right: String,
 }
@@ -61,10 +67,15 @@ impl AlwaysFixableViolation for NegateEqualOp {
 /// a == b
 /// ```
 ///
+/// ## Fix safety
+/// The fix is marked as unsafe, as it might change the behaviour
+/// if `a` and/or `b` overrides `__ne__`/`__eq__`
+/// in such a manner that they don't return booleans.
+///
 /// ## References
 /// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
-#[violation]
-pub struct NegateNotEqualOp {
+#[derive(ViolationMetadata)]
+pub(crate) struct NegateNotEqualOp {
     left: String,
     right: String,
 }
@@ -100,8 +111,8 @@ impl AlwaysFixableViolation for NegateNotEqualOp {
 ///
 /// ## References
 /// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
-#[violation]
-pub struct DoubleNegation {
+#[derive(ViolationMetadata)]
+pub(crate) struct DoubleNegation {
     expr: String,
 }
 
@@ -133,12 +144,7 @@ fn is_exception_check(stmt: &Stmt) -> bool {
 }
 
 /// SIM201
-pub(crate) fn negation_with_equal_op(
-    checker: &mut Checker,
-    expr: &Expr,
-    op: UnaryOp,
-    operand: &Expr,
-) {
+pub(crate) fn negation_with_equal_op(checker: &Checker, expr: &Expr, op: UnaryOp, operand: &Expr) {
     if !matches!(op, UnaryOp::Not) {
         return;
     }
@@ -176,20 +182,20 @@ pub(crate) fn negation_with_equal_op(
     );
     let node = ast::ExprCompare {
         left: left.clone(),
-        ops: vec![CmpOp::NotEq],
+        ops: Box::from([CmpOp::NotEq]),
         comparators: comparators.clone(),
         range: TextRange::default(),
     };
-    diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+    diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
         checker.generator().expr(&node.into()),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// SIM202
 pub(crate) fn negation_with_not_equal_op(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &Expr,
     op: UnaryOp,
     operand: &Expr,
@@ -206,7 +212,7 @@ pub(crate) fn negation_with_not_equal_op(
     else {
         return;
     };
-    if !matches!(&ops[..], [CmpOp::NotEq]) {
+    if !matches!(&**ops, [CmpOp::NotEq]) {
         return;
     }
     if is_exception_check(checker.semantic().current_statement()) {
@@ -231,19 +237,19 @@ pub(crate) fn negation_with_not_equal_op(
     );
     let node = ast::ExprCompare {
         left: left.clone(),
-        ops: vec![CmpOp::Eq],
+        ops: Box::from([CmpOp::Eq]),
         comparators: comparators.clone(),
         range: TextRange::default(),
     };
-    diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+    diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
         checker.generator().expr(&node.into()),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// SIM208
-pub(crate) fn double_negation(checker: &mut Checker, expr: &Expr, op: UnaryOp, operand: &Expr) {
+pub(crate) fn double_negation(checker: &Checker, expr: &Expr, op: UnaryOp, operand: &Expr) {
     if !matches!(op, UnaryOp::Not) {
         return;
     }
@@ -270,17 +276,17 @@ pub(crate) fn double_negation(checker: &mut Checker, expr: &Expr, op: UnaryOp, o
             checker.locator().slice(operand.as_ref()).to_string(),
             expr.range(),
         )));
-    } else if checker.semantic().is_builtin("bool") {
+    } else if checker.semantic().has_builtin_binding("bool") {
         let node = ast::ExprName {
-            id: "bool".into(),
+            id: Name::new_static("bool"),
             ctx: ExprContext::Load,
             range: TextRange::default(),
         };
         let node1 = ast::ExprCall {
             func: Box::new(node.into()),
             arguments: Arguments {
-                args: vec![*operand.clone()],
-                keywords: vec![],
+                args: Box::from([*operand.clone()]),
+                keywords: Box::from([]),
                 range: TextRange::default(),
             },
             range: TextRange::default(),
@@ -290,5 +296,5 @@ pub(crate) fn double_negation(checker: &mut Checker, expr: &Expr, op: UnaryOp, o
             expr.range(),
         )));
     };
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

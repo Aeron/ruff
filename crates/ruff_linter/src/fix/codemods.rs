@@ -1,16 +1,22 @@
 //! Interface for editing code snippets. These functions take statements or expressions as input,
 //! and return the modified code snippet as output.
+use std::borrow::Cow;
+
 use anyhow::{bail, Result};
 use libcst_native::{
-    Codegen, CodegenState, ImportNames, ParenthesizableWhitespace, SmallStatement, Statement,
+    Codegen, CodegenState, Expression, ImportNames, NameOrAttribute, ParenthesizableWhitespace,
+    SmallStatement, Statement,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::{smallvec, SmallVec};
+use unicode_normalization::UnicodeNormalization;
 
+use ruff_python_ast::name::UnqualifiedName;
 use ruff_python_ast::Stmt;
 use ruff_python_codegen::Stylist;
-use ruff_source_file::Locator;
 
-use crate::cst::helpers::compose_module_path;
 use crate::cst::matchers::match_statement;
+use crate::Locator;
 
 /// Glue code to make libcst codegen work with ruff's Stylist
 pub(crate) trait CodegenStylist<'a>: Codegen<'a> {
@@ -75,14 +81,21 @@ pub(crate) fn remove_imports<'a>(
     // Preserve the trailing comma (or not) from the last entry.
     let trailing_comma = aliases.last().and_then(|alias| alias.comma.clone());
 
-    for member in member_names {
-        let alias_index = aliases
-            .iter()
-            .position(|alias| member == compose_module_path(&alias.name));
-        if let Some(index) = alias_index {
-            aliases.remove(index);
+    // Remove any imports that are specified in the `imports` iterator (but, e.g., if the name is
+    // provided once, only remove the first occurrence).
+    let mut counts = member_names.fold(FxHashMap::<&str, usize>::default(), |mut map, name| {
+        map.entry(name).and_modify(|c| *c += 1).or_insert(1);
+        map
+    });
+    aliases.retain(|alias| {
+        let name = qualified_name_from_name_or_attribute(&alias.name);
+        if let Some(count) = counts.get_mut(name.as_str()).filter(|count| **count > 0) {
+            *count -= 1;
+            false
+        } else {
+            true
         }
-    }
+    });
 
     // But avoid destroying any trailing comments.
     if let Some(alias) = aliases.last_mut() {
@@ -139,10 +152,10 @@ pub(crate) fn retain_imports(
     // Preserve the trailing comma (or not) from the last entry.
     let trailing_comma = aliases.last().and_then(|alias| alias.comma.clone());
 
+    // Retain any imports that are specified in the `imports` iterator.
+    let member_names = member_names.iter().copied().collect::<FxHashSet<_>>();
     aliases.retain(|alias| {
-        member_names
-            .iter()
-            .any(|member| *member == compose_module_path(&alias.name))
+        member_names.contains(qualified_name_from_name_or_attribute(&alias.name).as_str())
     });
 
     // But avoid destroying any trailing comments.
@@ -163,4 +176,57 @@ pub(crate) fn retain_imports(
     }
 
     Ok(tree.codegen_stylist(stylist))
+}
+
+/// Create an NFKC-normalized qualified name from a libCST node.
+fn qualified_name_from_name_or_attribute(module: &NameOrAttribute) -> String {
+    fn collect_segments<'a>(expr: &'a Expression, parts: &mut SmallVec<[&'a str; 8]>) {
+        match expr {
+            Expression::Call(expr) => {
+                collect_segments(&expr.func, parts);
+            }
+            Expression::Attribute(expr) => {
+                collect_segments(&expr.value, parts);
+                parts.push(expr.attr.value);
+            }
+            Expression::Name(expr) => {
+                parts.push(expr.value);
+            }
+            _ => {}
+        }
+    }
+
+    /// Attempt to create an [`UnqualifiedName`] from a libCST expression.
+    ///
+    /// Strictly speaking, the `UnqualifiedName` returned by this function may be invalid,
+    /// since it hasn't been NFKC-normalized. In order for an `UnqualifiedName` to be
+    /// comparable to one constructed from a `ruff_python_ast` node, it has to undergo
+    /// NFKC normalization. As a local function, however, this is fine;
+    /// the outer function always performs NFKC normalization before returning the
+    /// qualified name to the caller.
+    fn unqualified_name_from_expression<'a>(
+        expr: &'a Expression<'a>,
+    ) -> Option<UnqualifiedName<'a>> {
+        let mut segments = smallvec![];
+        collect_segments(expr, &mut segments);
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.into_iter().collect())
+        }
+    }
+
+    let unnormalized = match module {
+        NameOrAttribute::N(name) => Cow::Borrowed(name.value),
+        NameOrAttribute::A(attr) => {
+            let name = attr.attr.value;
+            let prefix = unqualified_name_from_expression(&attr.value);
+            prefix.map_or_else(
+                || Cow::Borrowed(name),
+                |prefix| Cow::Owned(format!("{prefix}.{name}")),
+            )
+        }
+    };
+
+    unnormalized.nfkc().collect()
 }

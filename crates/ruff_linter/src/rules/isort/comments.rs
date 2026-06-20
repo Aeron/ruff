@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 
-use ruff_python_index::Indexer;
-use ruff_source_file::Locator;
+use ruff_python_trivia::CommentRanges;
 use ruff_text_size::{Ranged, TextRange};
+
+use crate::Locator;
 
 #[derive(Debug)]
 pub(crate) struct Comment<'a> {
@@ -20,10 +21,9 @@ impl Ranged for Comment<'_> {
 pub(crate) fn collect_comments<'a>(
     range: TextRange,
     locator: &'a Locator,
-    indexer: &'a Indexer,
+    comment_ranges: &'a CommentRanges,
 ) -> Vec<Comment<'a>> {
-    indexer
-        .comment_ranges()
+    comment_ranges
         .comments_in_range(range)
         .iter()
         .map(|range| Comment {

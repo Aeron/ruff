@@ -3,8 +3,9 @@ use std::string::ToString;
 use rustc_hash::FxHashSet;
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::{self as ast, Expr, Identifier, Keyword};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::Name;
+use ruff_python_ast::{self as ast, Expr, Keyword};
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -35,8 +36,8 @@ use super::super::format::FormatSummary;
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatInvalidFormat {
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatInvalidFormat {
     pub(crate) message: String,
 }
 
@@ -74,13 +75,13 @@ impl Violation for PercentFormatInvalidFormat {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatExpectedMapping;
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatExpectedMapping;
 
 impl Violation for PercentFormatExpectedMapping {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`%`-format string expected mapping but got sequence")
+        "`%`-format string expected mapping but got sequence".to_string()
     }
 }
 
@@ -110,13 +111,13 @@ impl Violation for PercentFormatExpectedMapping {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatExpectedSequence;
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatExpectedSequence;
 
 impl Violation for PercentFormatExpectedSequence {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`%`-format string expected sequence but got mapping")
+        "`%`-format string expected sequence but got mapping".to_string()
     }
 }
 
@@ -139,8 +140,8 @@ impl Violation for PercentFormatExpectedSequence {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatExtraNamedArguments {
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatExtraNamedArguments {
     missing: Vec<String>,
 }
 
@@ -179,8 +180,8 @@ impl AlwaysFixableViolation for PercentFormatExtraNamedArguments {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatMissingArgument {
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatMissingArgument {
     missing: Vec<String>,
 }
 
@@ -219,13 +220,13 @@ impl Violation for PercentFormatMissingArgument {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatMixedPositionalAndNamed;
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatMixedPositionalAndNamed;
 
 impl Violation for PercentFormatMixedPositionalAndNamed {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`%`-format string has mixed positional and named placeholders")
+        "`%`-format string has mixed positional and named placeholders".to_string()
     }
 }
 
@@ -249,8 +250,8 @@ impl Violation for PercentFormatMixedPositionalAndNamed {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatPositionalCountMismatch {
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatPositionalCountMismatch {
     wanted: usize,
     got: usize,
 }
@@ -287,13 +288,13 @@ impl Violation for PercentFormatPositionalCountMismatch {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatStarRequiresSequence;
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatStarRequiresSequence;
 
 impl Violation for PercentFormatStarRequiresSequence {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`%`-format string `*` specifier requires sequence")
+        "`%`-format string `*` specifier requires sequence".to_string()
     }
 }
 
@@ -317,8 +318,8 @@ impl Violation for PercentFormatStarRequiresSequence {
 ///
 /// ## References
 /// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
-#[violation]
-pub struct PercentFormatUnsupportedFormatCharacter {
+#[derive(ViolationMetadata)]
+pub(crate) struct PercentFormatUnsupportedFormatCharacter {
     pub(crate) char: char,
 }
 
@@ -348,8 +349,8 @@ impl Violation for PercentFormatUnsupportedFormatCharacter {
 ///
 /// ## References
 /// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
-#[violation]
-pub struct StringDotFormatInvalidFormat {
+#[derive(ViolationMetadata)]
+pub(crate) struct StringDotFormatInvalidFormat {
     pub(crate) message: String,
 }
 
@@ -380,9 +381,9 @@ impl Violation for StringDotFormatInvalidFormat {
 ///
 /// ## References
 /// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
-#[violation]
-pub struct StringDotFormatExtraNamedArguments {
-    missing: Vec<String>,
+#[derive(ViolationMetadata)]
+pub(crate) struct StringDotFormatExtraNamedArguments {
+    missing: Vec<Name>,
 }
 
 impl Violation for StringDotFormatExtraNamedArguments {
@@ -421,8 +422,8 @@ impl Violation for StringDotFormatExtraNamedArguments {
 ///
 /// ## References
 /// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
-#[violation]
-pub struct StringDotFormatExtraPositionalArguments {
+#[derive(ViolationMetadata)]
+pub(crate) struct StringDotFormatExtraPositionalArguments {
     missing: Vec<String>,
 }
 
@@ -464,8 +465,8 @@ impl Violation for StringDotFormatExtraPositionalArguments {
 ///
 /// ## References
 /// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
-#[violation]
-pub struct StringDotFormatMissingArguments {
+#[derive(ViolationMetadata)]
+pub(crate) struct StringDotFormatMissingArguments {
     missing: Vec<String>,
 }
 
@@ -502,13 +503,13 @@ impl Violation for StringDotFormatMissingArguments {
 ///
 /// ## References
 /// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
-#[violation]
-pub struct StringDotFormatMixingAutomatic;
+#[derive(ViolationMetadata)]
+pub(crate) struct StringDotFormatMixingAutomatic;
 
 impl Violation for StringDotFormatMixingAutomatic {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`.format` string mixes automatic and manual numbering")
+        "`.format` string mixes automatic and manual numbering".to_string()
     }
 }
 
@@ -524,7 +525,7 @@ fn has_star_args(args: &[Expr]) -> bool {
 
 /// F502
 pub(crate) fn percent_format_expected_mapping(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
@@ -537,9 +538,9 @@ pub(crate) fn percent_format_expected_mapping(
             | Expr::Set(_)
             | Expr::ListComp(_)
             | Expr::SetComp(_)
-            | Expr::GeneratorExp(_) => checker
-                .diagnostics
-                .push(Diagnostic::new(PercentFormatExpectedMapping, location)),
+            | Expr::Generator(_) => {
+                checker.report_diagnostic(Diagnostic::new(PercentFormatExpectedMapping, location));
+            }
             _ => {}
         }
     }
@@ -547,21 +548,19 @@ pub(crate) fn percent_format_expected_mapping(
 
 /// F503
 pub(crate) fn percent_format_expected_sequence(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
 ) {
     if summary.num_positional > 1 && matches!(right, Expr::Dict(_) | Expr::DictComp(_)) {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(PercentFormatExpectedSequence, location));
+        checker.report_diagnostic(Diagnostic::new(PercentFormatExpectedSequence, location));
     }
 }
 
 /// F504
 pub(crate) fn percent_format_extra_named_arguments(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
@@ -573,20 +572,19 @@ pub(crate) fn percent_format_extra_named_arguments(
         return;
     };
     // If any of the keys are spread, abort.
-    if dict.keys.iter().any(Option::is_none) {
+    if dict.iter_keys().any(|key| key.is_none()) {
         return;
     }
 
     let missing: Vec<(usize, &str)> = dict
-        .keys
-        .iter()
+        .iter_keys()
         .enumerate()
         .filter_map(|(index, key)| match key {
             Some(Expr::StringLiteral(ast::ExprStringLiteral { value, .. })) => {
-                if summary.keywords.contains(value.as_str()) {
+                if summary.keywords.contains(value.to_str()) {
                     None
                 } else {
-                    Some((index, value.as_str()))
+                    Some((index, value.to_str()))
                 }
             }
             _ => None,
@@ -615,12 +613,12 @@ pub(crate) fn percent_format_extra_named_arguments(
         )?;
         Ok(Fix::safe_edit(edit))
     });
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// F505
 pub(crate) fn percent_format_missing_arguments(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
@@ -629,19 +627,19 @@ pub(crate) fn percent_format_missing_arguments(
         return;
     }
 
-    let Expr::Dict(ast::ExprDict { keys, .. }) = &right else {
+    let Expr::Dict(dict) = &right else {
         return;
     };
 
-    if keys.iter().any(Option::is_none) {
+    if dict.iter_keys().any(|key| key.is_none()) {
         return; // contains **x splat
     }
 
     let mut keywords = FxHashSet::default();
-    for key in keys.iter().flatten() {
+    for key in dict.iter_keys().flatten() {
         match key {
             Expr::StringLiteral(ast::ExprStringLiteral { value, .. }) => {
-                keywords.insert(value);
+                keywords.insert(value.to_str());
             }
             _ => {
                 return; // Dynamic keys present
@@ -652,11 +650,11 @@ pub(crate) fn percent_format_missing_arguments(
     let missing: Vec<&String> = summary
         .keywords
         .iter()
-        .filter(|k| !keywords.contains(k))
+        .filter(|k| !keywords.contains(k.as_str()))
         .collect();
 
     if !missing.is_empty() {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             PercentFormatMissingArgument {
                 missing: missing.iter().map(|&s| s.clone()).collect(),
             },
@@ -667,12 +665,12 @@ pub(crate) fn percent_format_missing_arguments(
 
 /// F506
 pub(crate) fn percent_format_mixed_positional_and_named(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     location: TextRange,
 ) {
     if !(summary.num_positional == 0 || summary.keywords.is_empty()) {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             PercentFormatMixedPositionalAndNamed,
             location,
         ));
@@ -681,7 +679,7 @@ pub(crate) fn percent_format_mixed_positional_and_named(
 
 /// F507
 pub(crate) fn percent_format_positional_count_mismatch(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
@@ -690,17 +688,17 @@ pub(crate) fn percent_format_positional_count_mismatch(
         return;
     }
 
-    if let Expr::Tuple(ast::ExprTuple { elts, .. }) = right {
+    if let Expr::Tuple(tuple) = right {
         let mut found = 0;
-        for elt in elts {
-            if elt.is_starred_expr() {
+        for element in tuple {
+            if element.is_starred_expr() {
                 return;
             }
             found += 1;
         }
 
         if found != summary.num_positional {
-            checker.diagnostics.push(Diagnostic::new(
+            checker.report_diagnostic(Diagnostic::new(
                 PercentFormatPositionalCountMismatch {
                     wanted: summary.num_positional,
                     got: found,
@@ -713,7 +711,7 @@ pub(crate) fn percent_format_positional_count_mismatch(
 
 /// F508
 pub(crate) fn percent_format_star_requires_sequence(
-    checker: &mut Checker,
+    checker: &Checker,
     summary: &CFormatSummary,
     right: &Expr,
     location: TextRange,
@@ -721,8 +719,7 @@ pub(crate) fn percent_format_star_requires_sequence(
     if summary.starred {
         match right {
             Expr::Dict(_) | Expr::DictComp(_) => checker
-                .diagnostics
-                .push(Diagnostic::new(PercentFormatStarRequiresSequence, location)),
+                .report_diagnostic(Diagnostic::new(PercentFormatStarRequiresSequence, location)),
             _ => {}
         }
     }
@@ -730,7 +727,7 @@ pub(crate) fn percent_format_star_requires_sequence(
 
 /// F522
 pub(crate) fn string_dot_format_extra_named_arguments(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ast::ExprCall,
     summary: &FormatSummary,
     keywords: &[Keyword],
@@ -744,13 +741,13 @@ pub(crate) fn string_dot_format_extra_named_arguments(
         .iter()
         .filter_map(|Keyword { arg, .. }| arg.as_ref());
 
-    let missing: Vec<(usize, &str)> = keywords
+    let missing: Vec<(usize, &Name)> = keywords
         .enumerate()
         .filter_map(|(index, keyword)| {
-            if summary.keywords.contains(keyword.as_ref()) {
+            if summary.keywords.contains(keyword.id()) {
                 None
             } else {
-                Some((index, keyword.as_str()))
+                Some((index, &keyword.id))
             }
         })
         .collect();
@@ -759,10 +756,7 @@ pub(crate) fn string_dot_format_extra_named_arguments(
         return;
     }
 
-    let names: Vec<String> = missing
-        .iter()
-        .map(|(_, name)| (*name).to_string())
-        .collect();
+    let names: Vec<Name> = missing.iter().map(|(_, name)| (*name).clone()).collect();
     let mut diagnostic = Diagnostic::new(
         StringDotFormatExtraNamedArguments { missing: names },
         call.range(),
@@ -777,12 +771,12 @@ pub(crate) fn string_dot_format_extra_named_arguments(
         )?;
         Ok(Fix::safe_edit(edit))
     });
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// F523
 pub(crate) fn string_dot_format_extra_positional_arguments(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ast::ExprCall,
     summary: &FormatSummary,
     args: &[Expr],
@@ -847,12 +841,12 @@ pub(crate) fn string_dot_format_extra_positional_arguments(
         });
     }
 
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// F524
 pub(crate) fn string_dot_format_missing_argument(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ast::ExprCall,
     summary: &FormatSummary,
     args: &[Expr],
@@ -866,27 +860,27 @@ pub(crate) fn string_dot_format_missing_argument(
         .iter()
         .filter_map(|k| {
             let Keyword { arg, .. } = &k;
-            arg.as_ref().map(Identifier::as_str)
+            arg.as_ref().map(ruff_python_ast::Identifier::id)
         })
         .collect();
 
     let missing: Vec<String> = summary
         .autos
         .iter()
-        .chain(summary.indices.iter())
+        .chain(&summary.indices)
         .filter(|&&i| i >= args.len())
         .map(ToString::to_string)
         .chain(
             summary
                 .keywords
                 .iter()
-                .filter(|k| !keywords.contains(k.as_str()))
-                .cloned(),
+                .filter(|k| !keywords.contains(*k))
+                .map(ToString::to_string),
         )
         .collect();
 
     if !missing.is_empty() {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             StringDotFormatMissingArguments { missing },
             call.range(),
         ));
@@ -895,12 +889,12 @@ pub(crate) fn string_dot_format_missing_argument(
 
 /// F525
 pub(crate) fn string_dot_format_mixing_automatic(
-    checker: &mut Checker,
+    checker: &Checker,
     call: &ast::ExprCall,
     summary: &FormatSummary,
 ) {
     if !(summary.autos.is_empty() || summary.indices.is_empty()) {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             StringDotFormatMixingAutomatic,
             call.range(),
         ));

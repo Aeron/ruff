@@ -1,11 +1,5 @@
-use ruff_python_parser::ParseError;
-use ruff_text_size::{TextLen, TextRange, TextSize};
-
-use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_source_file::Locator;
-
-use crate::logging::DisplayParseErrorType;
+use ruff_diagnostics::Violation;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 /// ## What it does
 /// This is not a regular diagnostic; instead, it's raised when a file cannot be read
@@ -29,13 +23,15 @@ use crate::logging::DisplayParseErrorType;
 /// ## References
 /// - [UNIX Permissions introduction](https://mason.gmu.edu/~montecin/UNIXpermiss.htm)
 /// - [Command Line Basics: Symbolic Links](https://www.digitalocean.com/community/tutorials/workflow-symbolic-links)
-#[violation]
+#[derive(ViolationMetadata)]
 pub struct IOError {
     pub message: String,
 }
 
 /// E902
 impl Violation for IOError {
+    // The format message is used by the `derive_message_formats` macro.
+    #![allow(clippy::useless_format)]
     #[derive_message_formats]
     fn message(&self) -> String {
         let IOError { message } = self;
@@ -43,6 +39,10 @@ impl Violation for IOError {
     }
 }
 
+/// ## Removed
+/// This rule has been removed. Syntax errors will
+/// always be shown regardless of whether this rule is selected or not.
+///
 /// ## What it does
 /// Checks for code that contains syntax errors.
 ///
@@ -62,39 +62,17 @@ impl Violation for IOError {
 ///
 /// ## References
 /// - [Python documentation: Syntax Errors](https://docs.python.org/3/tutorial/errors.html#syntax-errors)
-#[violation]
-pub struct SyntaxError {
-    pub message: String,
-}
+#[derive(ViolationMetadata)]
+#[deprecated(note = "E999 has been removed")]
+pub(crate) struct SyntaxError;
 
+#[allow(deprecated)]
 impl Violation for SyntaxError {
-    #[derive_message_formats]
     fn message(&self) -> String {
-        let SyntaxError { message } = self;
-        format!("SyntaxError: {message}")
+        unreachable!("E999 has been removed")
     }
-}
 
-/// E901
-pub(crate) fn syntax_error(
-    diagnostics: &mut Vec<Diagnostic>,
-    parse_error: &ParseError,
-    locator: &Locator,
-) {
-    let rest = locator.after(parse_error.offset);
-
-    // Try to create a non-empty range so that the diagnostic can print a caret at the
-    // right position. This requires that we retrieve the next character, if any, and take its length
-    // to maintain char-boundaries.
-    let len = rest
-        .chars()
-        .next()
-        .map_or(TextSize::new(0), TextLen::text_len);
-
-    diagnostics.push(Diagnostic::new(
-        SyntaxError {
-            message: format!("{}", DisplayParseErrorType::new(&parse_error.error)),
-        },
-        TextRange::at(parse_error.offset, len),
-    ));
+    fn message_formats() -> &'static [&'static str] {
+        &["SyntaxError"]
+    }
 }

@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::helpers::any_over_expr;
 use ruff_python_ast::{self as ast, Expr, Stmt};
@@ -41,18 +41,18 @@ use crate::checkers::ast::Checker;
 /// pairs = (("a", 1), ("b", 2))
 /// result.update({x: y for x, y in pairs if y % 2})
 /// ```
-#[violation]
-pub struct ManualDictComprehension;
+#[derive(ViolationMetadata)]
+pub(crate) struct ManualDictComprehension;
 
 impl Violation for ManualDictComprehension {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use a dictionary comprehension instead of a for-loop")
+        "Use a dictionary comprehension instead of a for-loop".to_string()
     }
 }
 
 /// PERF403
-pub(crate) fn manual_dict_comprehension(checker: &mut Checker, target: &Expr, body: &[Stmt]) {
+pub(crate) fn manual_dict_comprehension(checker: &Checker, target: &Expr, body: &[Stmt]) {
     let (stmt, if_test) = match body {
         // ```python
         // for idx, name in enumerate(names):
@@ -102,16 +102,16 @@ pub(crate) fn manual_dict_comprehension(checker: &mut Checker, target: &Expr, bo
     };
 
     match target {
-        Expr::Tuple(ast::ExprTuple { elts, .. }) => {
-            if !elts
+        Expr::Tuple(tuple) => {
+            if !tuple
                 .iter()
-                .any(|elt| ComparableExpr::from(slice) == ComparableExpr::from(elt))
+                .any(|element| ComparableExpr::from(slice) == ComparableExpr::from(element))
             {
                 return;
             }
-            if !elts
+            if !tuple
                 .iter()
-                .any(|elt| ComparableExpr::from(value) == ComparableExpr::from(elt))
+                .any(|element| ComparableExpr::from(value) == ComparableExpr::from(element))
             {
                 return;
             }
@@ -128,7 +128,7 @@ pub(crate) fn manual_dict_comprehension(checker: &mut Checker, target: &Expr, bo
     }
 
     // Exclude non-dictionary value.
-    let Some(name) = subscript_value.as_name_expr() else {
+    let Expr::Name(name) = &**subscript_value else {
         return;
     };
     let Some(binding) = checker
@@ -164,7 +164,5 @@ pub(crate) fn manual_dict_comprehension(checker: &mut Checker, target: &Expr, bo
         return;
     }
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(ManualDictComprehension, *range));
+    checker.report_diagnostic(Diagnostic::new(ManualDictComprehension, *range));
 }

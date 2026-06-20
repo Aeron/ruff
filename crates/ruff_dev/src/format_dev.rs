@@ -27,47 +27,50 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-use ruff_cli::args::{FormatCommand, LogLevelArgs};
-use ruff_cli::resolve::resolve;
+use ruff::args::{ConfigArguments, FormatArguments, FormatCommand, GlobalConfigArgs, LogLevelArgs};
+use ruff::resolve::resolve;
 use ruff_formatter::{FormatError, LineWidth, PrintError};
 use ruff_linter::logging::LogLevel;
 use ruff_linter::settings::types::{FilePattern, FilePatternSet};
 use ruff_python_formatter::{
     format_module_source, FormatModuleError, MagicTrailingComma, PreviewMode, PyFormatOptions,
 };
+use ruff_python_parser::ParseError;
 use ruff_workspace::resolver::{python_files_in_path, PyprojectConfig, ResolvedFile, Resolver};
 
-/// Find files that ruff would check so we can format them. Adapted from `ruff_cli`.
-#[allow(clippy::type_complexity)]
-fn ruff_check_paths(
-    dirs: &[PathBuf],
-) -> anyhow::Result<(
-    Vec<Result<ResolvedFile, ignore::Error>>,
-    Resolver,
-    PyprojectConfig,
-)> {
+fn parse_cli(dirs: &[PathBuf]) -> anyhow::Result<(FormatArguments, ConfigArguments)> {
     let args_matches = FormatCommand::command()
         .no_binary_name(true)
         .get_matches_from(dirs);
     let arguments: FormatCommand = FormatCommand::from_arg_matches(&args_matches)?;
-    let (cli, overrides) = arguments.partition();
-    let mut pyproject_config = resolve(
-        cli.isolated,
-        cli.config.as_deref(),
-        &overrides,
-        cli.stdin_filename.as_deref(),
-    )?;
+    let (cli, config_arguments) = arguments.partition(GlobalConfigArgs::default())?;
+    Ok((cli, config_arguments))
+}
+
+/// Find the [`PyprojectConfig`] to use for formatting.
+fn find_pyproject_config(
+    cli: &FormatArguments,
+    config_arguments: &ConfigArguments,
+) -> anyhow::Result<PyprojectConfig> {
+    let mut pyproject_config = resolve(config_arguments, cli.stdin_filename.as_deref())?;
     // We don't want to format pyproject.toml
     pyproject_config.settings.file_resolver.include = FilePatternSet::try_from_iter([
         FilePattern::Builtin("*.py"),
         FilePattern::Builtin("*.pyi"),
     ])
     .unwrap();
-    let (paths, resolver) = python_files_in_path(&cli.files, &pyproject_config, &overrides)?;
-    if paths.is_empty() {
-        bail!("no python files in {:?}", dirs)
-    }
-    Ok((paths, resolver, pyproject_config))
+    Ok(pyproject_config)
+}
+
+/// Find files that ruff would check so we can format them. Adapted from `ruff`.
+#[allow(clippy::type_complexity)]
+fn ruff_check_paths<'a>(
+    pyproject_config: &'a PyprojectConfig,
+    cli: &FormatArguments,
+    config_arguments: &ConfigArguments,
+) -> anyhow::Result<(Vec<Result<ResolvedFile, ignore::Error>>, Resolver<'a>)> {
+    let (paths, resolver) = python_files_in_path(&cli.files, pyproject_config, config_arguments)?;
+    Ok((paths, resolver))
 }
 
 /// Collects statistics over the formatted files to compute the Jaccard index or the similarity
@@ -131,7 +134,7 @@ impl Statistics {
         }
     }
 
-    /// We currently prefer the the similarity index, but i'd like to keep this around
+    /// We currently prefer the similarity index, but i'd like to keep this around
     #[allow(clippy::cast_precision_loss, unused)]
     pub(crate) fn jaccard_index(&self) -> f32 {
         self.intersection as f32 / (self.black_input + self.ruff_output + self.intersection) as f32
@@ -191,6 +194,10 @@ pub(crate) struct Args {
     /// Format the files. Without this flag, the python files are not modified
     #[arg(long)]
     pub(crate) write: bool,
+
+    #[arg(long)]
+    pub(crate) preview: bool,
+
     /// Control the verbosity of the output
     #[arg(long, default_value_t, value_enum)]
     pub(crate) format: Format,
@@ -215,6 +222,7 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) files_with_errors: Option<u32>,
     #[clap(flatten)]
+    #[allow(clippy::struct_field_names)]
     pub(crate) log_level_args: LogLevelArgs,
 }
 
@@ -231,7 +239,8 @@ pub(crate) fn main(args: &Args) -> anyhow::Result<ExitCode> {
     let all_success = if args.multi_project {
         format_dev_multi_project(args, error_file)?
     } else {
-        let result = format_dev_project(&args.files, args.stability_check, args.write)?;
+        let result =
+            format_dev_project(&args.files, args.stability_check, args.write, args.preview)?;
         let error_count = result.error_count();
 
         if result.error_count() > 0 {
@@ -242,8 +251,7 @@ pub(crate) fn main(args: &Args) -> anyhow::Result<ExitCode> {
         }
         info!(
             parent: None,
-            "Done: {} stability errors, {} files, similarity index {:.5}), files with differences: {} took {:.2}s, {} input files contained syntax errors ",
-            error_count,
+            "Done: {error_count} stability/syntax errors, {} files, similarity index {:.5}), files with differences: {} took {:.2}s, {} input files contained syntax errors ",
             result.file_count,
             result.statistics.similarity_index(),
             result.statistics.files_with_differences,
@@ -278,7 +286,7 @@ fn setup_logging(log_level_args: &LogLevelArgs, log_file: Option<&Path>) -> io::
         LogLevel::Quiet => tracing::Level::WARN,
         LogLevel::Silent => tracing::Level::ERROR,
     };
-    // 1. `RUST_LOG=`, 2. explicit CLI log level, 3. info, the ruff_cli default
+    // 1. `RUST_LOG=`, 2. explicit CLI log level, 3. info, the ruff default
     let filter_layer = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::builder()
             .with_default_directive(log_level.into())
@@ -340,7 +348,12 @@ fn format_dev_multi_project(
     for project_path in project_paths {
         debug!(parent: None, "Starting {}", project_path.display());
 
-        match format_dev_project(&[project_path.clone()], args.stability_check, args.write) {
+        match format_dev_project(
+            &[project_path.clone()],
+            args.stability_check,
+            args.write,
+            args.preview,
+        ) {
             Ok(result) => {
                 total_errors += result.error_count();
                 total_files += result.file_count;
@@ -438,6 +451,7 @@ fn format_dev_project(
     files: &[PathBuf],
     stability_check: bool,
     write: bool,
+    preview: bool,
 ) -> anyhow::Result<CheckRepoResult> {
     let start = Instant::now();
 
@@ -450,11 +464,17 @@ fn format_dev_project(
         files[0].display()
     );
 
-    // TODO(konstin): black excludes
+    // TODO(konstin): Respect black's excludes.
 
-    // Find files to check (or in this case, format twice). Adapted from ruff_cli
+    // Find files to check (or in this case, format twice). Adapted from ruff
     // First argument is ignored
-    let (paths, resolver, pyproject_config) = ruff_check_paths(files)?;
+    let (cli, overrides) = parse_cli(files)?;
+    let pyproject_config = find_pyproject_config(&cli, &overrides)?;
+    let (paths, resolver) = ruff_check_paths(&pyproject_config, &cli, &overrides)?;
+
+    if paths.is_empty() {
+        bail!("No Python files found under the given path(s)");
+    }
 
     let results = {
         let pb_span =
@@ -471,9 +491,9 @@ fn format_dev_project(
                 path,
                 stability_check,
                 write,
+                preview,
                 &black_options,
                 &resolver,
-                &pyproject_config,
             );
             pb_span.pb_inc(1);
             result
@@ -524,14 +544,14 @@ fn format_dev_project(
     })
 }
 
-/// Error handling in between walkdir and `format_dev_file`
+/// Error handling in between walkdir and `format_dev_file`.
 fn format_dir_entry(
     resolved_file: Result<ResolvedFile, ignore::Error>,
     stability_check: bool,
     write: bool,
+    preview: bool,
     options: &BlackOptions,
     resolver: &Resolver,
-    pyproject_config: &PyprojectConfig,
 ) -> anyhow::Result<(Result<Statistics, CheckFileError>, PathBuf), Error> {
     let resolved_file = resolved_file.context("Iterating the files in the repository failed")?;
     // For some reason it does not filter in the beginning
@@ -542,16 +562,19 @@ fn format_dir_entry(
     let path = resolved_file.into_path();
     let mut options = options.to_py_format_options(&path);
 
-    let settings = resolver.resolve(&path, pyproject_config);
+    if preview {
+        options = options.with_preview(PreviewMode::Enabled);
+    }
+
+    let settings = resolver.resolve(&path);
     // That's a bad way of doing this but it's not worth doing something better for format_dev
     if settings.formatter.line_width != LineWidth::default() {
         options = options.with_line_width(settings.formatter.line_width);
     }
 
     // Handle panics (mostly in `debug_assert!`)
-    let result = match catch_unwind(|| format_dev_file(&path, stability_check, write, options)) {
-        Ok(result) => result,
-        Err(panic) => {
+    let result = catch_unwind(|| format_dev_file(&path, stability_check, write, options))
+        .unwrap_or_else(|panic| {
             if let Some(message) = panic.downcast_ref::<String>() {
                 Err(CheckFileError::Panic {
                     message: message.clone(),
@@ -566,8 +589,7 @@ fn format_dir_entry(
                     message: "(Panic didn't set a string message)".to_string(),
                 })
             }
-        }
-    };
+        });
     Ok((result, path))
 }
 
@@ -742,11 +764,11 @@ enum CheckFileError {
         reformatted: String,
     },
     /// The input file was already invalid (not a bug)
-    SyntaxErrorInInput(FormatModuleError),
+    SyntaxErrorInInput(ParseError),
     /// The formatter introduced a syntax error
     SyntaxErrorInOutput {
         formatted: String,
-        error: FormatModuleError,
+        error: ParseError,
     },
     /// The formatter failed (bug)
     FormatError(FormatError),
@@ -773,7 +795,7 @@ impl CheckFileError {
             | CheckFileError::PrintError(_)
             | CheckFileError::Panic { .. } => false,
             #[cfg(not(debug_assertions))]
-            CheckFileError::Slow(_) => false,
+            CheckFileError::Slow(_) => true,
         }
     }
 }
@@ -796,7 +818,7 @@ fn format_dev_file(
     let start = Instant::now();
     let printed = match format_module_source(&content, options.clone()) {
         Ok(printed) => printed,
-        Err(err @ (FormatModuleError::LexError(_) | FormatModuleError::ParseError(_))) => {
+        Err(FormatModuleError::ParseError(err)) => {
             return Err(CheckFileError::SyntaxErrorInInput(err));
         }
         Err(FormatModuleError::FormatError(err)) => {
@@ -823,7 +845,7 @@ fn format_dev_file(
     if stability_check {
         let reformatted = match format_module_source(formatted, options) {
             Ok(reformatted) => reformatted,
-            Err(err @ (FormatModuleError::LexError(_) | FormatModuleError::ParseError(_))) => {
+            Err(FormatModuleError::ParseError(err)) => {
                 return Err(CheckFileError::SyntaxErrorInOutput {
                     formatted: formatted.to_string(),
                     error: err,

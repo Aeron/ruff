@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Applicability, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr};
 use ruff_python_semantic::BindingKind;
 use ruff_text_size::Ranged;
@@ -38,22 +38,22 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: The `raise` statement](https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement)
-#[violation]
-pub struct UnnecessaryParenOnRaiseException;
+#[derive(ViolationMetadata)]
+pub(crate) struct UnnecessaryParenOnRaiseException;
 
 impl AlwaysFixableViolation for UnnecessaryParenOnRaiseException {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Unnecessary parentheses on raised exception")
+        "Unnecessary parentheses on raised exception".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Remove unnecessary parentheses")
+        "Remove unnecessary parentheses".to_string()
     }
 }
 
 /// RSE102
-pub(crate) fn unnecessary_paren_on_raise_exception(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn unnecessary_paren_on_raise_exception(checker: &Checker, expr: &Expr) {
     let Expr::Call(ast::ExprCall {
         func,
         arguments,
@@ -76,17 +76,36 @@ pub(crate) fn unnecessary_paren_on_raise_exception(checker: &mut Checker, expr: 
             None
         };
 
-        // `ctypes.WinError()` is a function, not a class. It's part of the standard library, so
-        // we might as well get it right.
-        if exception_type
-            .as_ref()
-            .is_some_and(ExceptionType::is_builtin)
-            && checker
+        if exception_type.is_none() {
+            // If the method name doesn't _look_ like a class (i.e., it's lowercase), it's
+            // probably a function call, not a class.
+            let identifier = match func.as_ref() {
+                Expr::Name(ast::ExprName { id, .. }) => Some(id.as_str()),
+                Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.as_str()),
+                _ => None,
+            };
+            if identifier.is_some_and(|identifier| {
+                identifier
+                    .strip_prefix('_')
+                    .unwrap_or(identifier)
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_lowercase)
+            }) {
+                return;
+            }
+
+            // `ctypes.WinError()` is a function, not a class. It's part of the standard library, so
+            // we might as well get it right.
+            if checker
                 .semantic()
-                .resolve_call_path(func)
-                .is_some_and(|call_path| matches!(call_path.as_slice(), ["ctypes", "WinError"]))
-        {
-            return;
+                .resolve_qualified_name(func)
+                .is_some_and(|qualified_name| {
+                    matches!(qualified_name.segments(), ["ctypes", "WinError"])
+                })
+            {
+                return;
+            }
         }
 
         let mut diagnostic = Diagnostic::new(UnnecessaryParenOnRaiseException, arguments.range());
@@ -122,7 +141,7 @@ pub(crate) fn unnecessary_paren_on_raise_exception(checker: &mut Checker, expr: 
             ));
         }
 
-        checker.diagnostics.push(diagnostic);
+        checker.report_diagnostic(diagnostic);
     }
 }
 

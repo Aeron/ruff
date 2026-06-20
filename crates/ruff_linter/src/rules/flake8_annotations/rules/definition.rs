@@ -1,10 +1,9 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::ReturnStatementVisitor;
 use ruff_python_ast::identifier::Identifier;
 use ruff_python_ast::visitor::Visitor;
-use ruff_python_ast::{self as ast, Expr, ParameterWithDefault, Stmt};
-use ruff_python_parser::typing::parse_type_annotation;
+use ruff_python_ast::{self as ast, Expr, Stmt};
 use ruff_python_semantic::analyze::visibility;
 use ruff_python_semantic::Definition;
 use ruff_python_stdlib::typing::simple_magic_return_type;
@@ -24,18 +23,21 @@ use crate::rules::ruff::typing::type_hint_resolves_to_any;
 /// any provided arguments match expectation.
 ///
 /// ## Example
+///
 /// ```python
-/// def foo(x):
-///     ...
+/// def foo(x): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// def foo(x: int):
-///     ...
+/// def foo(x: int): ...
 /// ```
-#[violation]
-pub struct MissingTypeFunctionArgument {
+///
+/// ## Options
+/// - `lint.flake8-annotations.suppress-dummy-args`
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingTypeFunctionArgument {
     name: String,
 }
 
@@ -56,18 +58,21 @@ impl Violation for MissingTypeFunctionArgument {
 /// any provided arguments match expectation.
 ///
 /// ## Example
+///
 /// ```python
-/// def foo(*args):
-///     ...
+/// def foo(*args): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// def foo(*args: int):
-///     ...
+/// def foo(*args: int): ...
 /// ```
-#[violation]
-pub struct MissingTypeArgs {
+///
+/// ## Options
+/// - `lint.flake8-annotations.suppress-dummy-args`
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingTypeArgs {
     name: String,
 }
 
@@ -88,18 +93,21 @@ impl Violation for MissingTypeArgs {
 /// any provided arguments match expectation.
 ///
 /// ## Example
+///
 /// ```python
-/// def foo(**kwargs):
-///     ...
+/// def foo(**kwargs): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// def foo(**kwargs: int):
-///     ...
+/// def foo(**kwargs: int): ...
 /// ```
-#[violation]
-pub struct MissingTypeKwargs {
+///
+/// ## Options
+/// - `lint.flake8-annotations.suppress-dummy-args`
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingTypeKwargs {
     name: String,
 }
 
@@ -111,6 +119,9 @@ impl Violation for MissingTypeKwargs {
     }
 }
 
+/// ## Removed
+/// This rule has been removed because type checkers can infer this type without annotation.
+///
 /// ## What it does
 /// Checks that instance method `self` arguments have type annotations.
 ///
@@ -123,31 +134,36 @@ impl Violation for MissingTypeKwargs {
 /// annotation is not strictly necessary.
 ///
 /// ## Example
+///
 /// ```python
 /// class Foo:
-///     def bar(self):
-///         ...
+///     def bar(self): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// class Foo:
-///     def bar(self: "Foo"):
-///         ...
+///     def bar(self: "Foo"): ...
 /// ```
-#[violation]
-pub struct MissingTypeSelf {
-    name: String,
-}
+#[derive(ViolationMetadata)]
+#[deprecated(note = "ANN101 has been removed")]
+pub(crate) struct MissingTypeSelf;
 
+#[allow(deprecated)]
 impl Violation for MissingTypeSelf {
-    #[derive_message_formats]
     fn message(&self) -> String {
-        let Self { name } = self;
-        format!("Missing type annotation for `{name}` in method")
+        unreachable!("ANN101 has been removed");
+    }
+
+    fn message_formats() -> &'static [&'static str] {
+        &["Missing type annotation for `{name}` in method"]
     }
 }
 
+/// ## Removed
+/// This rule has been removed because type checkers can infer this type without annotation.
+///
 /// ## What it does
 /// Checks that class method `cls` arguments have type annotations.
 ///
@@ -160,30 +176,32 @@ impl Violation for MissingTypeSelf {
 /// annotation is not strictly necessary.
 ///
 /// ## Example
+///
 /// ```python
 /// class Foo:
 ///     @classmethod
-///     def bar(cls):
-///         ...
+///     def bar(cls): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// class Foo:
 ///     @classmethod
-///     def bar(cls: Type["Foo"]):
-///         ...
+///     def bar(cls: Type["Foo"]): ...
 /// ```
-#[violation]
-pub struct MissingTypeCls {
-    name: String,
-}
+#[derive(ViolationMetadata)]
+#[deprecated(note = "ANN102 has been removed")]
+pub(crate) struct MissingTypeCls;
 
+#[allow(deprecated)]
 impl Violation for MissingTypeCls {
-    #[derive_message_formats]
     fn message(&self) -> String {
-        let Self { name } = self;
-        format!("Missing type annotation for `{name}` in classmethod")
+        unreachable!("ANN102 has been removed")
+    }
+
+    fn message_formats() -> &'static [&'static str] {
+        &["Missing type annotation for `{name}` in classmethod"]
     }
 }
 
@@ -206,8 +224,8 @@ impl Violation for MissingTypeCls {
 /// def add(a: int, b: int) -> int:
 ///     return a + b
 /// ```
-#[violation]
-pub struct MissingReturnTypeUndocumentedPublicFunction {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingReturnTypeUndocumentedPublicFunction {
     name: String,
     annotation: Option<String>,
 }
@@ -222,12 +240,11 @@ impl Violation for MissingReturnTypeUndocumentedPublicFunction {
     }
 
     fn fix_title(&self) -> Option<String> {
-        let Self { annotation, .. } = self;
-        if let Some(annotation) = annotation {
-            Some(format!("Add return type annotation: `{annotation}`"))
-        } else {
-            Some(format!("Add return type annotation"))
-        }
+        let title = match &self.annotation {
+            Some(annotation) => format!("Add return type annotation: `{annotation}`"),
+            None => "Add return type annotation".to_string(),
+        };
+        Some(title)
     }
 }
 
@@ -250,8 +267,8 @@ impl Violation for MissingReturnTypeUndocumentedPublicFunction {
 /// def _add(a: int, b: int) -> int:
 ///     return a + b
 /// ```
-#[violation]
-pub struct MissingReturnTypePrivateFunction {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingReturnTypePrivateFunction {
     name: String,
     annotation: Option<String>,
 }
@@ -266,12 +283,11 @@ impl Violation for MissingReturnTypePrivateFunction {
     }
 
     fn fix_title(&self) -> Option<String> {
-        let Self { annotation, .. } = self;
-        if let Some(annotation) = annotation {
-            Some(format!("Add return type annotation: `{annotation}`"))
-        } else {
-            Some(format!("Add return type annotation"))
-        }
+        let title = match &self.annotation {
+            Some(annotation) => format!("Add return type annotation: `{annotation}`"),
+            None => "Add return type annotation".to_string(),
+        };
+        Some(title)
     }
 }
 
@@ -286,7 +302,7 @@ impl Violation for MissingReturnTypePrivateFunction {
 ///
 /// Note that type checkers often allow you to omit the return type annotation for
 /// `__init__` methods, as long as at least one argument has a type annotation. To
-/// opt-in to this behavior, use the `mypy-init-return` setting in your `pyproject.toml`
+/// opt in to this behavior, use the `mypy-init-return` setting in your `pyproject.toml`
 /// or `ruff.toml` file:
 ///
 /// ```toml
@@ -307,8 +323,8 @@ impl Violation for MissingReturnTypePrivateFunction {
 ///     def __init__(self, x: int) -> None:
 ///         self.x = x
 /// ```
-#[violation]
-pub struct MissingReturnTypeSpecialMethod {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingReturnTypeSpecialMethod {
     name: String,
     annotation: Option<String>,
 }
@@ -323,12 +339,11 @@ impl Violation for MissingReturnTypeSpecialMethod {
     }
 
     fn fix_title(&self) -> Option<String> {
-        let Self { annotation, .. } = self;
-        if let Some(annotation) = annotation {
-            Some(format!("Add return type annotation: `{annotation}`"))
-        } else {
-            Some(format!("Add return type annotation"))
-        }
+        let title = match &self.annotation {
+            Some(annotation) => format!("Add return type annotation: `{annotation}`"),
+            None => "Add return type annotation".to_string(),
+        };
+        Some(title)
     }
 }
 
@@ -355,8 +370,8 @@ impl Violation for MissingReturnTypeSpecialMethod {
 ///     def bar() -> int:
 ///         return 1
 /// ```
-#[violation]
-pub struct MissingReturnTypeStaticMethod {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingReturnTypeStaticMethod {
     name: String,
     annotation: Option<String>,
 }
@@ -371,12 +386,11 @@ impl Violation for MissingReturnTypeStaticMethod {
     }
 
     fn fix_title(&self) -> Option<String> {
-        let Self { annotation, .. } = self;
-        if let Some(annotation) = annotation {
-            Some(format!("Add return type annotation: `{annotation}`"))
-        } else {
-            Some(format!("Add return type annotation"))
-        }
+        let title = match &self.annotation {
+            Some(annotation) => format!("Add return type annotation: `{annotation}`"),
+            None => "Add return type annotation".to_string(),
+        };
+        Some(title)
     }
 }
 
@@ -403,8 +417,8 @@ impl Violation for MissingReturnTypeStaticMethod {
 ///     def bar(cls) -> int:
 ///         return 1
 /// ```
-#[violation]
-pub struct MissingReturnTypeClassMethod {
+#[derive(ViolationMetadata)]
+pub(crate) struct MissingReturnTypeClassMethod {
     name: String,
     annotation: Option<String>,
 }
@@ -419,12 +433,11 @@ impl Violation for MissingReturnTypeClassMethod {
     }
 
     fn fix_title(&self) -> Option<String> {
-        let Self { annotation, .. } = self;
-        if let Some(annotation) = annotation {
-            Some(format!("Add return type annotation: `{annotation}`"))
-        } else {
-            Some(format!("Add return type annotation"))
-        }
+        let title = match &self.annotation {
+            Some(annotation) => format!("Add return type annotation: `{annotation}`"),
+            None => "Add return type annotation".to_string(),
+        };
+        Some(title)
     }
 }
 
@@ -441,37 +454,37 @@ impl Violation for MissingReturnTypeClassMethod {
 /// `Any` as an "escape hatch" only when it is really needed.
 ///
 /// ## Example
+///
 /// ```python
-/// def foo(x: Any):
-///     ...
+/// def foo(x: Any): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// def foo(x: int):
-///     ...
+/// def foo(x: int): ...
 /// ```
 ///
 /// ## Known problems
 ///
 /// Type aliases are unsupported and can lead to false positives.
 /// For example, the following will trigger this rule inadvertently:
+///
 /// ```python
 /// from typing import Any
 ///
 /// MyAny = Any
 ///
 ///
-/// def foo(x: MyAny):
-///     ...
+/// def foo(x: MyAny): ...
 /// ```
 ///
 /// ## References
-/// - [PEP 484](https://www.python.org/dev/peps/pep-0484/#the-any-type)
+/// - [Typing spec: `Any`](https://typing.readthedocs.io/en/latest/spec/special-types.html#any)
 /// - [Python documentation: `typing.Any`](https://docs.python.org/3/library/typing.html#typing.Any)
 /// - [Mypy documentation: The Any type](https://mypy.readthedocs.io/en/stable/kinds_of_types.html#the-any-type)
-#[violation]
-pub struct AnyType {
+#[derive(ViolationMetadata)]
+pub(crate) struct AnyType {
     name: String,
 }
 
@@ -482,7 +495,6 @@ impl Violation for AnyType {
         format!("Dynamically typed expressions (typing.Any) are disallowed in `{name}`")
     }
 }
-
 fn is_none_returning(body: &[Stmt]) -> bool {
     let mut visitor = ReturnStatementVisitor::default();
     visitor.visit_body(body);
@@ -505,20 +517,12 @@ fn check_dynamically_typed<F>(
 ) where
     F: FnOnce() -> String,
 {
-    if let Expr::StringLiteral(ast::ExprStringLiteral {
-        range,
-        value: string,
-        ..
-    }) = annotation
-    {
+    if let Expr::StringLiteral(string_expr) = annotation {
         // Quoted annotations
-        if let Ok((parsed_annotation, _)) =
-            parse_type_annotation(string, *range, checker.locator().contents())
-        {
+        if let Ok(parsed_annotation) = checker.parse_type_annotation(string_expr) {
             if type_hint_resolves_to_any(
-                &parsed_annotation,
-                checker.semantic(),
-                checker.locator(),
+                parsed_annotation.expression(),
+                checker,
                 checker.settings.target_version.minor(),
             ) {
                 diagnostics.push(Diagnostic::new(
@@ -528,12 +532,7 @@ fn check_dynamically_typed<F>(
             }
         }
     } else {
-        if type_hint_resolves_to_any(
-            annotation,
-            checker.semantic(),
-            checker.locator(),
-            checker.settings.target_version.minor(),
-        ) {
+        if type_hint_resolves_to_any(annotation, checker, checker.settings.target_version.minor()) {
             diagnostics.push(Diagnostic::new(
                 AnyType { name: func() },
                 annotation.range(),
@@ -542,7 +541,45 @@ fn check_dynamically_typed<F>(
     }
 }
 
+/// Return `true` if a function appears to be a stub.
+fn is_stub_function(function_def: &ast::StmtFunctionDef, checker: &Checker) -> bool {
+    /// Returns `true` if a function has an empty body.
+    fn is_empty_body(function_def: &ast::StmtFunctionDef) -> bool {
+        function_def.body.iter().all(|stmt| match stmt {
+            Stmt::Pass(_) => true,
+            Stmt::Expr(ast::StmtExpr { value, range: _ }) => {
+                matches!(
+                    value.as_ref(),
+                    Expr::StringLiteral(_) | Expr::EllipsisLiteral(_)
+                )
+            }
+            _ => false,
+        })
+    }
+
+    // Ignore functions with empty bodies in...
+    if is_empty_body(function_def) {
+        // Stub definitions (.pyi files)...
+        if checker.source_type.is_stub() {
+            return true;
+        }
+
+        // Abstract methods...
+        if visibility::is_abstract(&function_def.decorator_list, checker.semantic()) {
+            return true;
+        }
+
+        // Overload definitions...
+        if visibility::is_overload(&function_def.decorator_list, checker.semantic()) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Generate flake8-annotation checks for a given `Definition`.
+/// ANN001, ANN401
 pub(crate) fn definition(
     checker: &Checker,
     definition: &Definition,
@@ -568,7 +605,6 @@ pub(crate) fn definition(
     // Keep track of whether we've seen any typed arguments or return values.
     let mut has_any_typed_arg = false; // Any argument has been typed?
     let mut has_typed_return = false; // Return value has been typed?
-    let mut has_typed_self_or_cls = false; // Has a typed `self` or `cls` argument?
 
     // Temporary storage for diagnostics; we emit them at the end
     // unless configured to suppress ANN* for declarations that are fully untyped.
@@ -576,31 +612,18 @@ pub(crate) fn definition(
 
     let is_overridden = visibility::is_override(decorator_list, checker.semantic());
 
-    // ANN001, ANN401
-    for ParameterWithDefault {
-        parameter,
-        default: _,
-        range: _,
-    } in parameters
-        .posonlyargs
-        .iter()
-        .chain(&parameters.args)
-        .chain(&parameters.kwonlyargs)
-        .skip(
-            // If this is a non-static method, skip `cls` or `self`.
-            usize::from(
-                is_method && !visibility::is_staticmethod(decorator_list, checker.semantic()),
-            ),
-        )
-    {
+    // If this is a non-static method, skip `cls` or `self`.
+    for parameter in parameters.iter_non_variadic_params().skip(usize::from(
+        is_method && !visibility::is_staticmethod(decorator_list, checker.semantic()),
+    )) {
         // ANN401 for dynamically typed parameters
-        if let Some(annotation) = &parameter.annotation {
+        if let Some(annotation) = parameter.annotation() {
             has_any_typed_arg = true;
             if checker.enabled(Rule::AnyType) && !is_overridden {
                 check_dynamically_typed(
                     checker,
                     annotation,
-                    || parameter.name.to_string(),
+                    || parameter.name().to_string(),
                     &mut diagnostics,
                 );
             }
@@ -609,14 +632,14 @@ pub(crate) fn definition(
                 && checker
                     .settings
                     .dummy_variable_rgx
-                    .is_match(&parameter.name))
+                    .is_match(parameter.name()))
             {
                 if checker.enabled(Rule::MissingTypeFunctionArgument) {
                     diagnostics.push(Diagnostic::new(
                         MissingTypeFunctionArgument {
-                            name: parameter.name.to_string(),
+                            name: parameter.name().to_string(),
                         },
-                        parameter.range(),
+                        parameter.parameter.range(),
                     ));
                 }
             }
@@ -680,43 +703,6 @@ pub(crate) fn definition(
         }
     }
 
-    // ANN101, ANN102
-    if is_method && !visibility::is_staticmethod(decorator_list, checker.semantic()) {
-        if let Some(ParameterWithDefault {
-            parameter,
-            default: _,
-            range: _,
-        }) = parameters
-            .posonlyargs
-            .first()
-            .or_else(|| parameters.args.first())
-        {
-            if parameter.annotation.is_none() {
-                if visibility::is_classmethod(decorator_list, checker.semantic()) {
-                    if checker.enabled(Rule::MissingTypeCls) {
-                        diagnostics.push(Diagnostic::new(
-                            MissingTypeCls {
-                                name: parameter.name.to_string(),
-                            },
-                            parameter.range(),
-                        ));
-                    }
-                } else {
-                    if checker.enabled(Rule::MissingTypeSelf) {
-                        diagnostics.push(Diagnostic::new(
-                            MissingTypeSelf {
-                                name: parameter.name.to_string(),
-                            },
-                            parameter.range(),
-                        ));
-                    }
-                }
-            } else {
-                has_typed_self_or_cls = true;
-            }
-        }
-    }
-
     // ANN201, ANN202, ANN401
     if let Some(expr) = &returns {
         has_typed_return = true;
@@ -730,39 +716,63 @@ pub(crate) fn definition(
     ) {
         if is_method && visibility::is_classmethod(decorator_list, checker.semantic()) {
             if checker.enabled(Rule::MissingReturnTypeClassMethod) {
-                let return_type = auto_return_type(function, checker.settings.target_version)
-                    .map(|return_type| checker.generator().expr(&return_type));
+                let return_type = if is_stub_function(function, checker) {
+                    None
+                } else {
+                    auto_return_type(function)
+                        .and_then(|return_type| {
+                            return_type.into_expression(
+                                checker.importer(),
+                                function.parameters.start(),
+                                checker.semantic(),
+                                checker.settings.target_version,
+                            )
+                        })
+                        .map(|(return_type, edits)| (checker.generator().expr(&return_type), edits))
+                };
                 let mut diagnostic = Diagnostic::new(
                     MissingReturnTypeClassMethod {
                         name: name.to_string(),
-                        annotation: return_type.clone(),
+                        annotation: return_type.clone().map(|(return_type, ..)| return_type),
                     },
                     function.identifier(),
                 );
-                if let Some(return_type) = return_type {
-                    diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
-                        format!(" -> {return_type}"),
-                        function.parameters.range().end(),
-                    )));
+                if let Some((return_type, edits)) = return_type {
+                    diagnostic.set_fix(Fix::unsafe_edits(
+                        Edit::insertion(format!(" -> {return_type}"), function.parameters.end()),
+                        edits,
+                    ));
                 }
                 diagnostics.push(diagnostic);
             }
         } else if is_method && visibility::is_staticmethod(decorator_list, checker.semantic()) {
             if checker.enabled(Rule::MissingReturnTypeStaticMethod) {
-                let return_type = auto_return_type(function, checker.settings.target_version)
-                    .map(|return_type| checker.generator().expr(&return_type));
+                let return_type = if is_stub_function(function, checker) {
+                    None
+                } else {
+                    auto_return_type(function)
+                        .and_then(|return_type| {
+                            return_type.into_expression(
+                                checker.importer(),
+                                function.parameters.start(),
+                                checker.semantic(),
+                                checker.settings.target_version,
+                            )
+                        })
+                        .map(|(return_type, edits)| (checker.generator().expr(&return_type), edits))
+                };
                 let mut diagnostic = Diagnostic::new(
                     MissingReturnTypeStaticMethod {
                         name: name.to_string(),
-                        annotation: return_type.clone(),
+                        annotation: return_type.clone().map(|(return_type, ..)| return_type),
                     },
                     function.identifier(),
                 );
-                if let Some(return_type) = return_type {
-                    diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
-                        format!(" -> {return_type}"),
-                        function.parameters.range().end(),
-                    )));
+                if let Some((return_type, edits)) = return_type {
+                    diagnostic.set_fix(Fix::unsafe_edits(
+                        Edit::insertion(format!(" -> {return_type}"), function.parameters.end()),
+                        edits,
+                    ));
                 }
                 diagnostics.push(diagnostic);
             }
@@ -780,7 +790,7 @@ pub(crate) fn definition(
                     );
                     diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
                         " -> None".to_string(),
-                        function.parameters.range().end(),
+                        function.parameters.end(),
                     )));
                     diagnostics.push(diagnostic);
                 }
@@ -798,7 +808,7 @@ pub(crate) fn definition(
                 if let Some(return_type) = return_type {
                     diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
                         format!(" -> {return_type}"),
-                        function.parameters.range().end(),
+                        function.parameters.end(),
                     )));
                 }
                 diagnostics.push(diagnostic);
@@ -807,42 +817,78 @@ pub(crate) fn definition(
             match visibility {
                 visibility::Visibility::Public => {
                     if checker.enabled(Rule::MissingReturnTypeUndocumentedPublicFunction) {
-                        let return_type =
-                            auto_return_type(function, checker.settings.target_version)
-                                .map(|return_type| checker.generator().expr(&return_type));
+                        let return_type = if is_stub_function(function, checker) {
+                            None
+                        } else {
+                            auto_return_type(function)
+                                .and_then(|return_type| {
+                                    return_type.into_expression(
+                                        checker.importer(),
+                                        function.parameters.start(),
+                                        checker.semantic(),
+                                        checker.settings.target_version,
+                                    )
+                                })
+                                .map(|(return_type, edits)| {
+                                    (checker.generator().expr(&return_type), edits)
+                                })
+                        };
                         let mut diagnostic = Diagnostic::new(
                             MissingReturnTypeUndocumentedPublicFunction {
                                 name: name.to_string(),
-                                annotation: return_type.clone(),
+                                annotation: return_type
+                                    .clone()
+                                    .map(|(return_type, ..)| return_type),
                             },
                             function.identifier(),
                         );
-                        if let Some(return_type) = return_type {
-                            diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
-                                format!(" -> {return_type}"),
-                                function.parameters.range().end(),
-                            )));
+                        if let Some((return_type, edits)) = return_type {
+                            diagnostic.set_fix(Fix::unsafe_edits(
+                                Edit::insertion(
+                                    format!(" -> {return_type}"),
+                                    function.parameters.end(),
+                                ),
+                                edits,
+                            ));
                         }
                         diagnostics.push(diagnostic);
                     }
                 }
                 visibility::Visibility::Private => {
                     if checker.enabled(Rule::MissingReturnTypePrivateFunction) {
-                        let return_type =
-                            auto_return_type(function, checker.settings.target_version)
-                                .map(|return_type| checker.generator().expr(&return_type));
+                        let return_type = if is_stub_function(function, checker) {
+                            None
+                        } else {
+                            auto_return_type(function)
+                                .and_then(|return_type| {
+                                    return_type.into_expression(
+                                        checker.importer(),
+                                        function.parameters.start(),
+                                        checker.semantic(),
+                                        checker.settings.target_version,
+                                    )
+                                })
+                                .map(|(return_type, edits)| {
+                                    (checker.generator().expr(&return_type), edits)
+                                })
+                        };
                         let mut diagnostic = Diagnostic::new(
                             MissingReturnTypePrivateFunction {
                                 name: name.to_string(),
-                                annotation: return_type.clone(),
+                                annotation: return_type
+                                    .clone()
+                                    .map(|(return_type, ..)| return_type),
                             },
                             function.identifier(),
                         );
-                        if let Some(return_type) = return_type {
-                            diagnostic.set_fix(Fix::unsafe_edit(Edit::insertion(
-                                format!(" -> {return_type}"),
-                                function.parameters.range().end(),
-                            )));
+                        if let Some((return_type, edits)) = return_type {
+                            diagnostic.set_fix(Fix::unsafe_edits(
+                                Edit::insertion(
+                                    format!(" -> {return_type}"),
+                                    function.parameters.end(),
+                                ),
+                                edits,
+                            ));
                         }
                         diagnostics.push(diagnostic);
                     }
@@ -850,13 +896,25 @@ pub(crate) fn definition(
             }
         }
     }
+
+    if !checker.settings.flake8_annotations.ignore_fully_untyped {
+        return diagnostics;
+    }
+
     // If settings say so, don't report any of the
     // diagnostics gathered here if there were no type annotations at all.
-    if checker.settings.flake8_annotations.ignore_fully_untyped
-        && !(has_any_typed_arg || has_typed_self_or_cls || has_typed_return)
+    if has_any_typed_arg
+        || has_typed_return
+        || (is_method
+            && !visibility::is_staticmethod(decorator_list, checker.semantic())
+            && parameters
+                .posonlyargs
+                .first()
+                .or_else(|| parameters.args.first())
+                .is_some_and(|first_param| first_param.annotation().is_some()))
     {
-        vec![]
-    } else {
         diagnostics
+    } else {
+        vec![]
     }
 }

@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::Truthiness;
 use ruff_python_ast::{self as ast, Expr, ExprCall};
 use ruff_python_semantic::analyze::logging;
@@ -30,18 +30,18 @@ use crate::checkers::ast::Checker;
 /// ```python
 /// logging.error("...")
 /// ```
-#[violation]
-pub struct ExceptionWithoutExcInfo;
+#[derive(ViolationMetadata)]
+pub(crate) struct ExceptionWithoutExcInfo;
 
 impl Violation for ExceptionWithoutExcInfo {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use of `logging.exception` with falsy `exc_info`")
+        "Use of `logging.exception` with falsy `exc_info`".to_string()
     }
 }
 
 /// LOG007
-pub(crate) fn exception_without_exc_info(checker: &mut Checker, call: &ExprCall) {
+pub(crate) fn exception_without_exc_info(checker: &Checker, call: &ExprCall) {
     match call.func.as_ref() {
         Expr::Attribute(ast::ExprAttribute { attr, .. }) => {
             if !matches!(
@@ -62,8 +62,10 @@ pub(crate) fn exception_without_exc_info(checker: &mut Checker, call: &ExprCall)
         Expr::Name(_) => {
             if !checker
                 .semantic()
-                .resolve_call_path(call.func.as_ref())
-                .is_some_and(|call_path| matches!(call_path.as_slice(), ["logging", "exception"]))
+                .resolve_qualified_name(call.func.as_ref())
+                .is_some_and(|qualified_name| {
+                    matches!(qualified_name.segments(), ["logging", "exception"])
+                })
             {
                 return;
             }
@@ -72,18 +74,17 @@ pub(crate) fn exception_without_exc_info(checker: &mut Checker, call: &ExprCall)
     }
 
     if exc_info_arg_is_falsey(call, checker) {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(ExceptionWithoutExcInfo, call.range()));
+        checker.report_diagnostic(Diagnostic::new(ExceptionWithoutExcInfo, call.range()));
     }
 }
 
-fn exc_info_arg_is_falsey(call: &ExprCall, checker: &mut Checker) -> bool {
+fn exc_info_arg_is_falsey(call: &ExprCall, checker: &Checker) -> bool {
     call.arguments
         .find_keyword("exc_info")
         .map(|keyword| &keyword.value)
         .is_some_and(|value| {
-            let truthiness = Truthiness::from_expr(value, |id| checker.semantic().is_builtin(id));
-            matches!(truthiness, Truthiness::False | Truthiness::Falsey)
+            let truthiness =
+                Truthiness::from_expr(value, |id| checker.semantic().has_builtin_binding(id));
+            truthiness.into_bool() == Some(false)
         })
 }

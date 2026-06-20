@@ -4,11 +4,11 @@ use std::slice;
 use ruff_notebook::CellOffsets;
 use ruff_python_ast::statement_visitor::StatementVisitor;
 use ruff_python_ast::{self as ast, ElifElseClause, ExceptHandler, MatchCase, Stmt};
-use ruff_source_file::Locator;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::directives::IsortDirectives;
 use crate::rules::isort::helpers;
+use crate::Locator;
 
 /// A block of imports within a Python module.
 #[derive(Debug, Default)]
@@ -120,11 +120,8 @@ impl<'a> BlockBuilder<'a> {
     }
 }
 
-impl<'a, 'b> StatementVisitor<'b> for BlockBuilder<'a>
-where
-    'b: 'a,
-{
-    fn visit_stmt(&mut self, stmt: &'b Stmt) {
+impl<'a> StatementVisitor<'a> for BlockBuilder<'a> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
         // Track manual splits (e.g., `# isort: split`).
         if self
             .splits
@@ -276,7 +273,7 @@ where
         self.nested = prev_nested;
     }
 
-    fn visit_except_handler(&mut self, except_handler: &'b ExceptHandler) {
+    fn visit_except_handler(&mut self, except_handler: &'a ExceptHandler) {
         let prev_nested = self.nested;
         self.nested = true;
 
@@ -290,14 +287,14 @@ where
         self.nested = prev_nested;
     }
 
-    fn visit_match_case(&mut self, match_case: &'b MatchCase) {
+    fn visit_match_case(&mut self, match_case: &'a MatchCase) {
         for stmt in &match_case.body {
             self.visit_stmt(stmt);
         }
         self.finalize(None);
     }
 
-    fn visit_elif_else_clause(&mut self, elif_else_clause: &'b ElifElseClause) {
+    fn visit_elif_else_clause(&mut self, elif_else_clause: &'a ElifElseClause) {
         for stmt in &elif_else_clause.body {
             self.visit_stmt(stmt);
         }

@@ -1,5 +1,5 @@
 use ruff_diagnostics::Violation;
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 /// ## What it does
 /// Checks for forward annotations that include invalid syntax.
@@ -15,22 +15,22 @@ use ruff_macros::{derive_message_formats, violation};
 /// will instead raise an error when type checking is performed.
 ///
 /// ## Example
+///
 /// ```python
-/// def foo() -> "/":
-///     ...
+/// def foo() -> "/": ...
 /// ```
 ///
 /// ## References
-/// - [PEP 563](https://www.python.org/dev/peps/pep-0563/)
-#[violation]
-pub struct ForwardAnnotationSyntaxError {
-    pub body: String,
+/// - [PEP 563 – Postponed Evaluation of Annotations](https://peps.python.org/pep-0563/)
+#[derive(ViolationMetadata)]
+pub(crate) struct ForwardAnnotationSyntaxError {
+    pub parse_error: String,
 }
 
 impl Violation for ForwardAnnotationSyntaxError {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let ForwardAnnotationSyntaxError { body } = self;
-        format!("Syntax error in forward annotation: `{body}`")
+        let ForwardAnnotationSyntaxError { parse_error } = self;
+        format!("Syntax error in forward annotation: {parse_error}")
     }
 }

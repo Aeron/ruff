@@ -2,7 +2,7 @@ use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::{self as ast, BoolOp, CmpOp, Expr};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::contains_effect;
 use ruff_python_ast::parenthesize::parenthesized_range;
 use ruff_text_size::Ranged;
@@ -28,22 +28,22 @@ use crate::checkers::ast::Checker;
 /// if dct.get("key"):
 ///     ...
 /// ```
-#[violation]
-pub struct UnnecessaryKeyCheck;
+#[derive(ViolationMetadata)]
+pub(crate) struct UnnecessaryKeyCheck;
 
 impl AlwaysFixableViolation for UnnecessaryKeyCheck {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Unnecessary key check before dictionary access")
+        "Unnecessary key check before dictionary access".to_string()
     }
 
     fn fix_title(&self) -> String {
-        format!("Replace with `dict.get`")
+        "Replace with `dict.get`".to_string()
     }
 }
 
 /// RUF019
-pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn unnecessary_key_check(checker: &Checker, expr: &Expr) {
     if !checker.semantic().in_boolean_test() {
         return;
     }
@@ -72,11 +72,11 @@ pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
         return;
     };
 
-    if !matches!(ops.as_slice(), [CmpOp::In]) {
+    if !matches!(&**ops, [CmpOp::In]) {
         return;
     }
 
-    let [obj_left] = comparators.as_slice() else {
+    let [obj_left] = &**comparators else {
         return;
     };
 
@@ -96,8 +96,8 @@ pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
         return;
     }
 
-    if contains_effect(obj_left, |id| checker.semantic().is_builtin(id))
-        || contains_effect(key_left, |id| checker.semantic().is_builtin(id))
+    if contains_effect(obj_left, |id| checker.semantic().has_builtin_binding(id))
+        || contains_effect(key_left, |id| checker.semantic().has_builtin_binding(id))
     {
         return;
     }
@@ -110,7 +110,7 @@ pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
                 parenthesized_range(
                     obj_right.into(),
                     right.into(),
-                    checker.indexer().comment_ranges(),
+                    checker.comment_ranges(),
                     checker.locator().contents(),
                 )
                 .unwrap_or(obj_right.range())
@@ -119,7 +119,7 @@ pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
                 parenthesized_range(
                     key_right.into(),
                     right.into(),
-                    checker.indexer().comment_ranges(),
+                    checker.comment_ranges(),
                     checker.locator().contents(),
                 )
                 .unwrap_or(key_right.range())
@@ -127,5 +127,5 @@ pub(crate) fn unnecessary_key_check(checker: &mut Checker, expr: &Expr) {
         ),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

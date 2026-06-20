@@ -1,14 +1,15 @@
+import _thread
 import builtins
 import os
 import posix
-from posix import abort
 import sys as std_sys
 import typing
-import typing_extensions
-import _thread
-import _winapi
+from posix import abort
+from typing import NoReturn
 
+import _winapi
 import pytest
+import typing_extensions
 from pytest import xfail as py_xfail
 
 ###
@@ -326,3 +327,92 @@ def end_of_file():
     if False:
         return 1
     x = 2 \
+
+
+
+# function return type annotation NoReturn
+def bar_no_return_annotation() -> NoReturn:
+    abort()
+
+def foo(x: int) -> int:
+    if x == 5:
+        return 5
+    bar_no_return_annotation()
+
+
+def foo(string: str) -> str:
+
+    match string:
+        case "a":
+            return "first"
+        case "b":
+            return "second"
+        case "c":
+            return "third"
+        case _:
+            bar_no_return_annotation()
+
+
+def foo() -> int:
+    def baz() -> int:
+        return 1
+
+    if baz() > 3:
+        return 1
+    bar_no_return_annotation()
+
+
+
+# function return type annotation typing_extensions.Never
+def bar_never_annotation() -> typing_extensions.Never:
+    abort()
+
+def foo(x: int) -> int:
+    if x == 5:
+        return 5
+    bar_never_annotation()
+
+
+def foo(string: str) -> str:
+
+    match string:
+        case "a":
+            return "first"
+        case "b":
+            return "second"
+        case "c":
+            return "third"
+        case _:
+            bar_never_annotation()
+
+
+def foo() -> int:
+    def baz() -> int:
+        return 1
+
+    if baz() > 3:
+        return 1
+    bar_never_annotation()
+
+
+def f():
+    if a:
+        return b
+    else:
+        with c:
+            d
+
+
+
+# The rule shouldn't generate a diagnostic for functions where one branch
+# calls a nested function annotated with `NoReturn` or `Never`.
+# However, the rule isn't handling this case correctly yet.
+# This is because looking up `bar` fails when analysing `foo` because
+# the semantic model hasn't yet seen `bar`'s declaration.
+# Supporting nested functions requires making this a deferred rule.
+def foo(x: int) -> int:
+    def bar() -> NoReturn:
+        abort()
+    if x == 5:
+        return 5
+    bar()

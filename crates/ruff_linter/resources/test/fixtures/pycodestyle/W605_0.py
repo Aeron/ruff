@@ -43,3 +43,18 @@ regex = '''
 '''  # noqa
 
 regex = '\\\_'
+
+#: W605:1:7
+u'foo\ bar'
+
+#: W605:1:13
+(
+    "foo \
+    bar \. baz"
+)
+
+#: W605:1:6
+"foo \. bar \t"
+
+#: W605:1:13
+"foo \t bar \."

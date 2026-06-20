@@ -1,14 +1,14 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::is_const_true;
 use ruff_python_ast::parenthesize::parenthesized_range;
 use ruff_python_ast::{self as ast, Keyword, Stmt};
 use ruff_python_trivia::CommentRanges;
-use ruff_source_file::Locator;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
 use crate::fix::edits::{remove_argument, Parentheses};
+use crate::Locator;
 
 /// ## What it does
 /// Checks for `inplace=True` usages in `pandas` function and method
@@ -33,16 +33,16 @@ use crate::fix::edits::{remove_argument, Parentheses};
 /// ```
 ///
 /// ## References
-/// - [_Why You Should Probably Never Use pandas inplace=True_](https://towardsdatascience.com/why-you-should-probably-never-use-pandas-inplace-true-9f9f211849e4)
-#[violation]
-pub struct PandasUseOfInplaceArgument;
+/// - [_Why You Should Probably Never Use pandas `inplace=True`_](https://towardsdatascience.com/why-you-should-probably-never-use-pandas-inplace-true-9f9f211849e4)
+#[derive(ViolationMetadata)]
+pub(crate) struct PandasUseOfInplaceArgument;
 
 impl Violation for PandasUseOfInplaceArgument {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("`inplace=True` should be avoided; it has inconsistent behavior")
+        "`inplace=True` should be avoided; it has inconsistent behavior".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
@@ -51,12 +51,21 @@ impl Violation for PandasUseOfInplaceArgument {
 }
 
 /// PD002
-pub(crate) fn inplace_argument(checker: &mut Checker, call: &ast::ExprCall) {
+pub(crate) fn inplace_argument(checker: &Checker, call: &ast::ExprCall) {
     // If the function was imported from another module, and it's _not_ Pandas, abort.
     if checker
         .semantic()
-        .resolve_call_path(&call.func)
-        .is_some_and(|call_path| !matches!(call_path.as_slice(), ["pandas", ..]))
+        .resolve_qualified_name(&call.func)
+        .is_some_and(|qualified_name| !matches!(qualified_name.segments(), ["pandas", ..]))
+    {
+        return;
+    }
+
+    // If the function doesn't take an `inplace` argument, abort.
+    if !call
+        .func
+        .as_attribute_expr()
+        .is_some_and(|func| accepts_inplace_argument(&func.attr))
     {
         return;
     }
@@ -84,14 +93,14 @@ pub(crate) fn inplace_argument(checker: &mut Checker, call: &ast::ExprCall) {
                         call,
                         keyword,
                         statement,
-                        checker.indexer().comment_ranges(),
+                        checker.comment_ranges(),
                         checker.locator(),
                     ) {
                         diagnostic.set_fix(fix);
                     }
                 }
 
-                checker.diagnostics.push(diagnostic);
+                checker.report_diagnostic(diagnostic);
             }
 
             // Duplicate keywords is a syntax error, so we can stop here.
@@ -133,4 +142,36 @@ fn convert_inplace_argument_to_assignment(
     .ok()?;
 
     Some(Fix::unsafe_edits(insert_assignment, [remove_argument]))
+}
+
+/// Returns `true` if the given method accepts an `inplace` argument when used on a Pandas
+/// `DataFrame`, `Series`, or `Index`.
+///
+/// See: <https://pandas.pydata.org/docs/reference/frame.html>
+fn accepts_inplace_argument(method: &str) -> bool {
+    matches!(
+        method,
+        "where"
+            | "mask"
+            | "query"
+            | "clip"
+            | "eval"
+            | "backfill"
+            | "bfill"
+            | "ffill"
+            | "fillna"
+            | "interpolate"
+            | "dropna"
+            | "pad"
+            | "replace"
+            | "drop"
+            | "drop_duplicates"
+            | "rename"
+            | "rename_axis"
+            | "reset_index"
+            | "set_index"
+            | "sort_values"
+            | "sort_index"
+            | "set_names"
+    )
 }

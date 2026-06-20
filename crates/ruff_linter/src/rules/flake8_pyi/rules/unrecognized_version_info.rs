@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::map_subscript;
 use ruff_python_ast::{self as ast, CmpOp, Expr, Int};
 use ruff_text_size::Ranged;
@@ -17,27 +17,28 @@ use crate::registry::Rule;
 /// For example, comparing against a string can lead to unexpected behavior.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info[0] == "2":
-///     ...
+/// if sys.version_info[0] == "2": ...
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info[0] == 2:
-///     ...
+/// if sys.version_info[0] == 2: ...
 /// ```
-#[violation]
-pub struct UnrecognizedVersionInfoCheck;
+///
+/// ## References
+/// - [Typing documentation: Version and Platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct UnrecognizedVersionInfoCheck;
 
 impl Violation for UnrecognizedVersionInfoCheck {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Unrecognized `sys.version_info` check")
+        "Unrecognized `sys.version_info` check".to_string()
     }
 }
 
@@ -55,27 +56,28 @@ impl Violation for UnrecognizedVersionInfoCheck {
 /// and minor versions.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info >= (3, 4, 3):
-///     ...
+/// if sys.version_info >= (3, 4, 3): ...
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info >= (3, 4):
-///     ...
+/// if sys.version_info >= (3, 4): ...
 /// ```
-#[violation]
-pub struct PatchVersionComparison;
+///
+/// ## References
+/// - [Typing documentation: Version and Platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct PatchVersionComparison;
 
 impl Violation for PatchVersionComparison {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Version comparison must use only major and minor version")
+        "Version comparison must use only major and minor version".to_string()
     }
 }
 
@@ -90,22 +92,23 @@ impl Violation for PatchVersionComparison {
 /// behavior.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info[:2] == (3,):
-///     ...
+/// if sys.version_info[:2] == (3,): ...
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// import sys
 ///
-/// if sys.version_info[0] == 3:
-///     ...
+/// if sys.version_info[0] == 3: ...
 /// ```
-#[violation]
-pub struct WrongTupleLengthVersionComparison {
+///
+/// ## References
+/// - [Typing documentation: Version and Platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct WrongTupleLengthVersionComparison {
     expected_length: usize,
 }
 
@@ -118,7 +121,7 @@ impl Violation for WrongTupleLengthVersionComparison {
 }
 
 /// PYI003, PYI004, PYI005
-pub(crate) fn unrecognized_version_info(checker: &mut Checker, test: &Expr) {
+pub(crate) fn unrecognized_version_info(checker: &Checker, test: &Expr) {
     let Expr::Compare(ast::ExprCompare {
         left,
         ops,
@@ -129,14 +132,14 @@ pub(crate) fn unrecognized_version_info(checker: &mut Checker, test: &Expr) {
         return;
     };
 
-    let ([op], [comparator]) = (ops.as_slice(), comparators.as_slice()) else {
+    let ([op], [comparator]) = (&**ops, &**comparators) else {
         return;
     };
 
     if !checker
         .semantic()
-        .resolve_call_path(map_subscript(left))
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["sys", "version_info"]))
+        .resolve_qualified_name(map_subscript(left))
+        .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["sys", "version_info"]))
     {
         return;
     }
@@ -145,15 +148,13 @@ pub(crate) fn unrecognized_version_info(checker: &mut Checker, test: &Expr) {
         version_check(checker, expected, test, *op, comparator);
     } else {
         if checker.enabled(Rule::UnrecognizedVersionInfoCheck) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
+            checker.report_diagnostic(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
         }
     }
 }
 
 fn version_check(
-    checker: &mut Checker,
+    checker: &Checker,
     expected: ExpectedComparator,
     test: &Expr,
     op: CmpOp,
@@ -164,38 +165,31 @@ fn version_check(
         if !is_int_constant(comparator) {
             if checker.enabled(Rule::UnrecognizedVersionInfoCheck) {
                 checker
-                    .diagnostics
-                    .push(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
+                    .report_diagnostic(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
             }
         }
         return;
     }
 
     // Tuple comparison, e.g., `sys.version_info == (3, 4)`.
-    let Expr::Tuple(ast::ExprTuple { elts, .. }) = comparator else {
+    let Expr::Tuple(tuple) = comparator else {
         if checker.enabled(Rule::UnrecognizedVersionInfoCheck) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
+            checker.report_diagnostic(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
         }
         return;
     };
 
-    if !elts.iter().all(is_int_constant) {
+    if !tuple.iter().all(is_int_constant) {
         // All tuple elements must be integers, e.g., `sys.version_info == (3, 4)` instead of
         // `sys.version_info == (3.0, 4)`.
         if checker.enabled(Rule::UnrecognizedVersionInfoCheck) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
+            checker.report_diagnostic(Diagnostic::new(UnrecognizedVersionInfoCheck, test.range()));
         }
-    } else if elts.len() > 2 {
+    } else if tuple.len() > 2 {
         // Must compare against major and minor version only, e.g., `sys.version_info == (3, 4)`
         // instead of `sys.version_info == (3, 4, 0)`.
         if checker.enabled(Rule::PatchVersionComparison) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(PatchVersionComparison, test.range()));
+            checker.report_diagnostic(Diagnostic::new(PatchVersionComparison, test.range()));
         }
     }
 
@@ -207,8 +201,8 @@ fn version_check(
                 _ => return,
             };
 
-            if elts.len() != expected_length {
-                checker.diagnostics.push(Diagnostic::new(
+            if tuple.len() != expected_length {
+                checker.report_diagnostic(Diagnostic::new(
                     WrongTupleLengthVersionComparison { expected_length },
                     test.range(),
                 ));

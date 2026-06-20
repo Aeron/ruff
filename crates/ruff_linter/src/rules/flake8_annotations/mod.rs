@@ -11,6 +11,7 @@ mod tests {
 
     use crate::assert_messages;
     use crate::registry::Rule;
+    use crate::settings::types::PythonVersion;
     use crate::settings::LinterSettings;
     use crate::test::test_path;
 
@@ -23,8 +24,6 @@ mod tests {
                     Rule::MissingTypeFunctionArgument,
                     Rule::MissingTypeArgs,
                     Rule::MissingTypeKwargs,
-                    Rule::MissingTypeSelf,
-                    Rule::MissingTypeCls,
                     Rule::MissingReturnTypeUndocumentedPublicFunction,
                     Rule::MissingReturnTypePrivateFunction,
                     Rule::MissingReturnTypeSpecialMethod,
@@ -51,8 +50,6 @@ mod tests {
                     Rule::MissingTypeFunctionArgument,
                     Rule::MissingTypeArgs,
                     Rule::MissingTypeKwargs,
-                    Rule::MissingTypeSelf,
-                    Rule::MissingTypeCls,
                     Rule::MissingReturnTypeUndocumentedPublicFunction,
                     Rule::MissingReturnTypePrivateFunction,
                     Rule::MissingReturnTypeSpecialMethod,
@@ -79,8 +76,6 @@ mod tests {
                     Rule::MissingTypeFunctionArgument,
                     Rule::MissingTypeArgs,
                     Rule::MissingTypeKwargs,
-                    Rule::MissingTypeSelf,
-                    Rule::MissingTypeCls,
                 ])
             },
         )?;
@@ -129,6 +124,25 @@ mod tests {
     }
 
     #[test]
+    fn auto_return_type_py38() -> Result<()> {
+        let diagnostics = test_path(
+            Path::new("flake8_annotations/auto_return_type.py"),
+            &LinterSettings {
+                target_version: PythonVersion::Py38,
+                ..LinterSettings::for_rules(vec![
+                    Rule::MissingReturnTypeUndocumentedPublicFunction,
+                    Rule::MissingReturnTypePrivateFunction,
+                    Rule::MissingReturnTypeSpecialMethod,
+                    Rule::MissingReturnTypeStaticMethod,
+                    Rule::MissingReturnTypeClassMethod,
+                ])
+            },
+        )?;
+        assert_messages!(diagnostics);
+        Ok(())
+    }
+
+    #[test]
     fn suppress_none_returning() -> Result<()> {
         let diagnostics = test_path(
             Path::new("flake8_annotations/suppress_none_returning.py"),
@@ -141,8 +155,6 @@ mod tests {
                     Rule::MissingTypeFunctionArgument,
                     Rule::MissingTypeArgs,
                     Rule::MissingTypeKwargs,
-                    Rule::MissingTypeSelf,
-                    Rule::MissingTypeCls,
                     Rule::MissingReturnTypeUndocumentedPublicFunction,
                     Rule::MissingReturnTypePrivateFunction,
                     Rule::MissingReturnTypeSpecialMethod,

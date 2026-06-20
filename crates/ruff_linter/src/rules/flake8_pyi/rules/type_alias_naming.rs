@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, Expr};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
 use crate::checkers::ast::Checker;
 
@@ -13,16 +13,16 @@ use crate::checkers::ast::Checker;
 /// to distinguish them from other variables.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// type_alias_name: TypeAlias = int
 /// ```
 ///
 /// Use instead:
-/// ```python
+/// ```pyi
 /// TypeAliasName: TypeAlias = int
 /// ```
-#[violation]
-pub struct SnakeCaseTypeAlias {
+#[derive(ViolationMetadata)]
+pub(crate) struct SnakeCaseTypeAlias {
     name: String,
 }
 
@@ -45,16 +45,23 @@ impl Violation for SnakeCaseTypeAlias {
 /// be avoided.
 ///
 /// ## Example
-/// ```python
-/// MyTypeT = int
+/// ```pyi
+/// from typing import TypeAlias
+///
+/// _MyTypeT: TypeAlias = int
 /// ```
 ///
 /// Use instead:
-/// ```python
-/// MyType = int
+/// ```pyi
+/// from typing import TypeAlias
+///
+/// _MyType: TypeAlias = int
 /// ```
-#[violation]
-pub struct TSuffixedTypeAlias {
+///
+/// ## References
+/// - [PEP 484: Type Aliases](https://peps.python.org/pep-0484/#type-aliases)
+#[derive(ViolationMetadata)]
+pub(crate) struct TSuffixedTypeAlias {
     name: String,
 }
 
@@ -94,13 +101,13 @@ fn is_t_suffixed_type_alias(name: &str) -> bool {
 }
 
 /// PYI042
-pub(crate) fn snake_case_type_alias(checker: &mut Checker, target: &Expr) {
+pub(crate) fn snake_case_type_alias(checker: &Checker, target: &Expr) {
     if let Expr::Name(ast::ExprName { id, range, .. }) = target {
         if !is_snake_case_type_alias(id) {
             return;
         }
 
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             SnakeCaseTypeAlias {
                 name: id.to_string(),
             },
@@ -110,13 +117,13 @@ pub(crate) fn snake_case_type_alias(checker: &mut Checker, target: &Expr) {
 }
 
 /// PYI043
-pub(crate) fn t_suffixed_type_alias(checker: &mut Checker, target: &Expr) {
+pub(crate) fn t_suffixed_type_alias(checker: &Checker, target: &Expr) {
     if let Expr::Name(ast::ExprName { id, range, .. }) = target {
         if !is_t_suffixed_type_alias(id) {
             return;
         }
 
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             TSuffixedTypeAlias {
                 name: id.to_string(),
             },

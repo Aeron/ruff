@@ -1,7 +1,7 @@
-use ruff_python_ast::{self as ast, Arguments, Expr, Stmt};
-
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, Expr, Stmt};
+use ruff_python_semantic::Modules;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -37,32 +37,27 @@ use crate::rules::flake8_django::rules::helpers::is_model_form;
 ///         model = Post
 ///         fields = ["title", "content"]
 /// ```
-#[violation]
-pub struct DjangoAllWithModelForm;
+#[derive(ViolationMetadata)]
+pub(crate) struct DjangoAllWithModelForm;
 
 impl Violation for DjangoAllWithModelForm {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Do not use `__all__` with `ModelForm`, use `fields` instead")
+        "Do not use `__all__` with `ModelForm`, use `fields` instead".to_string()
     }
 }
 
 /// DJ007
-pub(crate) fn all_with_model_form(
-    checker: &Checker,
-    arguments: Option<&Arguments>,
-    body: &[Stmt],
-) -> Option<Diagnostic> {
-    if !arguments.is_some_and(|arguments| {
-        arguments
-            .args
-            .iter()
-            .any(|base| is_model_form(base, checker.semantic()))
-    }) {
-        return None;
+pub(crate) fn all_with_model_form(checker: &Checker, class_def: &ast::StmtClassDef) {
+    if !checker.semantic().seen_module(Modules::DJANGO) {
+        return;
     }
 
-    for element in body {
+    if !is_model_form(class_def, checker.semantic()) {
+        return;
+    }
+
+    for element in &class_def.body {
         let Stmt::ClassDef(ast::StmtClassDef { name, body, .. }) = element else {
             continue;
         };
@@ -83,12 +78,20 @@ pub(crate) fn all_with_model_form(
                 match value.as_ref() {
                     Expr::StringLiteral(ast::ExprStringLiteral { value, .. }) => {
                         if value == "__all__" {
-                            return Some(Diagnostic::new(DjangoAllWithModelForm, element.range()));
+                            checker.report_diagnostic(Diagnostic::new(
+                                DjangoAllWithModelForm,
+                                element.range(),
+                            ));
+                            return;
                         }
                     }
                     Expr::BytesLiteral(ast::ExprBytesLiteral { value, .. }) => {
                         if value == "__all__".as_bytes() {
-                            return Some(Diagnostic::new(DjangoAllWithModelForm, element.range()));
+                            checker.report_diagnostic(Diagnostic::new(
+                                DjangoAllWithModelForm,
+                                element.range(),
+                            ));
+                            return;
                         }
                     }
                     _ => (),
@@ -96,5 +99,4 @@ pub(crate) fn all_with_model_form(
             }
         }
     }
-    None
 }

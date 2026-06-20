@@ -1,6 +1,6 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Fix};
 use ruff_diagnostics::{Applicability, Edit};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::parenthesize::parenthesized_range;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::{self as ast, Arguments, CmpOp, Comprehension, Expr};
@@ -31,18 +31,14 @@ use crate::checkers::ast::Checker;
 /// ## Fix safety
 /// Given `key in obj.keys()`, `obj` _could_ be a dictionary, or it could be
 /// another type that defines a `.keys()` method. In the latter case, removing
-/// the `.keys()` attribute could lead to a runtime error.
-///
-/// As such, this rule's fixes are marked as unsafe. In [preview], though,
-/// fixes are marked as safe when Ruff can determine that `obj` is a
-/// dictionary.
+/// the `.keys()` attribute could lead to a runtime error. The fix is marked
+/// as safe when the type of `obj` is known to be a dictionary; otherwise, it
+/// is marked as unsafe.
 ///
 /// ## References
 /// - [Python documentation: Mapping Types](https://docs.python.org/3/library/stdtypes.html#mapping-types-dict)
-///
-/// [preview]: https://docs.astral.sh/ruff/preview/
-#[violation]
-pub struct InDictKeys {
+#[derive(ViolationMetadata)]
+pub(crate) struct InDictKeys {
     operator: String,
 }
 
@@ -54,19 +50,12 @@ impl AlwaysFixableViolation for InDictKeys {
     }
 
     fn fix_title(&self) -> String {
-        let InDictKeys { operator: _ } = self;
-        format!("Remove `.keys()`")
+        "Remove `.keys()`".to_string()
     }
 }
 
 /// SIM118
-fn key_in_dict(
-    checker: &mut Checker,
-    left: &Expr,
-    right: &Expr,
-    operator: CmpOp,
-    parent: AnyNodeRef,
-) {
+fn key_in_dict(checker: &Checker, left: &Expr, right: &Expr, operator: CmpOp, parent: AnyNodeRef) {
     let Expr::Call(ast::ExprCall {
         func,
         arguments: Arguments { args, keywords, .. },
@@ -102,14 +91,14 @@ fn key_in_dict(
     let left_range = parenthesized_range(
         left.into(),
         parent,
-        checker.indexer().comment_ranges(),
+        checker.comment_ranges(),
         checker.locator().contents(),
     )
     .unwrap_or(left.range());
     let right_range = parenthesized_range(
         right.into(),
         parent,
-        checker.indexer().comment_ranges(),
+        checker.comment_ranges(),
         checker.locator().contents(),
     )
     .unwrap_or(right.range());
@@ -127,7 +116,7 @@ fn key_in_dict(
     {
         // The fix is only safe if we know the expression is a dictionary, since other types
         // can define a `.keys()` method.
-        let applicability = if checker.settings.preview.is_enabled() {
+        let applicability = {
             let is_dict = value.as_name_expr().is_some_and(|name| {
                 let Some(binding) = checker
                     .semantic()
@@ -143,8 +132,6 @@ fn key_in_dict(
             } else {
                 Applicability::Unsafe
             }
-        } else {
-            Applicability::Unsafe
         };
 
         // If the `.keys()` is followed by (e.g.) a keyword, we need to insert a space,
@@ -171,11 +158,11 @@ fn key_in_dict(
             ));
         }
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// SIM118 in a `for` loop.
-pub(crate) fn key_in_dict_for(checker: &mut Checker, for_stmt: &ast::StmtFor) {
+pub(crate) fn key_in_dict_for(checker: &Checker, for_stmt: &ast::StmtFor) {
     key_in_dict(
         checker,
         &for_stmt.target,
@@ -186,7 +173,7 @@ pub(crate) fn key_in_dict_for(checker: &mut Checker, for_stmt: &ast::StmtFor) {
 }
 
 /// SIM118 in a comprehension.
-pub(crate) fn key_in_dict_comprehension(checker: &mut Checker, comprehension: &Comprehension) {
+pub(crate) fn key_in_dict_comprehension(checker: &Checker, comprehension: &Comprehension) {
     key_in_dict(
         checker,
         &comprehension.target,
@@ -197,8 +184,8 @@ pub(crate) fn key_in_dict_comprehension(checker: &mut Checker, comprehension: &C
 }
 
 /// SIM118 in a comparison.
-pub(crate) fn key_in_dict_compare(checker: &mut Checker, compare: &ast::ExprCompare) {
-    let [op] = compare.ops.as_slice() else {
+pub(crate) fn key_in_dict_compare(checker: &Checker, compare: &ast::ExprCompare) {
+    let [op] = &*compare.ops else {
         return;
     };
 
@@ -206,7 +193,7 @@ pub(crate) fn key_in_dict_compare(checker: &mut Checker, compare: &ast::ExprComp
         return;
     }
 
-    let [right] = compare.comparators.as_slice() else {
+    let [right] = &*compare.comparators else {
         return;
     };
 

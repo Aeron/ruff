@@ -4,7 +4,8 @@ use ruff_python_ast::PatternMatchOr;
 
 use crate::comments::leading_comments;
 use crate::expression::parentheses::{
-    in_parentheses_only_soft_line_break_or_space, NeedsParentheses, OptionalParentheses,
+    in_parentheses_only_group, in_parentheses_only_soft_line_break_or_space, NeedsParentheses,
+    OptionalParentheses,
 };
 use crate::prelude::*;
 
@@ -41,7 +42,7 @@ impl FormatNodeRule<PatternMatchOr> for FormatPatternMatchOr {
             Ok(())
         });
 
-        inner.fmt(f)
+        in_parentheses_only_group(&inner).fmt(f)
     }
 }
 

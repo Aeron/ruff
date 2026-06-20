@@ -1,27 +1,34 @@
-use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::ExprBytesLiteral;
+use ruff_python_ast::{AnyNodeRef, StringLike};
 
-use crate::comments::SourceComment;
-use crate::expression::expr_string_literal::is_multiline_string;
-use crate::expression::parentheses::{NeedsParentheses, OptionalParentheses};
-use crate::expression::string::{AnyString, FormatString};
+use crate::expression::parentheses::{
+    in_parentheses_only_group, NeedsParentheses, OptionalParentheses,
+};
 use crate::prelude::*;
+use crate::string::implicit::FormatImplicitConcatenatedStringFlat;
+use crate::string::{implicit::FormatImplicitConcatenatedString, StringLikeExtensions};
 
 #[derive(Default)]
 pub struct FormatExprBytesLiteral;
 
 impl FormatNodeRule<ExprBytesLiteral> for FormatExprBytesLiteral {
     fn fmt_fields(&self, item: &ExprBytesLiteral, f: &mut PyFormatter) -> FormatResult<()> {
-        FormatString::new(&AnyString::Bytes(item)).fmt(f)
-    }
+        let ExprBytesLiteral { value, .. } = item;
 
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Handled as part of `fmt_fields`
-        Ok(())
+        if let [bytes_literal] = value.as_slice() {
+            bytes_literal.format().fmt(f)
+        } else {
+            // Always join byte literals that aren't parenthesized and thus, always on a single line.
+            if !f.context().node_level().is_parenthesized() {
+                if let Some(format_flat) =
+                    FormatImplicitConcatenatedStringFlat::new(item.into(), f.context())
+                {
+                    return format_flat.fmt(f);
+                }
+            }
+
+            in_parentheses_only_group(&FormatImplicitConcatenatedString::new(item)).fmt(f)
+        }
     }
 }
 
@@ -31,9 +38,9 @@ impl NeedsParentheses for ExprBytesLiteral {
         _parent: AnyNodeRef,
         context: &PyFormatContext,
     ) -> OptionalParentheses {
-        if self.implicit_concatenated {
+        if self.value.is_implicit_concatenated() {
             OptionalParentheses::Multiline
-        } else if is_multiline_string(self.into(), context.source()) {
+        } else if StringLike::Bytes(self).is_multiline(context) {
             OptionalParentheses::Never
         } else {
             OptionalParentheses::BestFit

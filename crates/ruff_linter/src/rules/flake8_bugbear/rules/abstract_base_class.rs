@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, Arguments, Expr, Keyword, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::identifier::Identifier;
 use ruff_python_semantic::analyze::visibility::{is_abstract, is_overload};
 use ruff_python_semantic::SemanticModel;
@@ -11,22 +11,27 @@ use crate::checkers::ast::Checker;
 use crate::registry::Rule;
 
 /// ## What it does
-/// Checks for abstract classes without abstract methods.
+/// Checks for abstract classes without abstract methods or properties.
+/// Annotated but unassigned class variables are regarded as abstract.
 ///
 /// ## Why is this bad?
-/// Abstract base classes are used to define interfaces. If they have no abstract
-/// methods, they are not useful.
+/// Abstract base classes are used to define interfaces. If an abstract base
+/// class has no abstract methods or properties, you may have forgotten
+/// to add an abstract method or property to the class,
+/// or omitted an `@abstractmethod` decorator.
 ///
-/// If the class is not meant to be used as an interface, it should not be an
-/// abstract base class. Remove the `ABC` base class from the class definition,
-/// or add an abstract method to the class.
+/// If the class is _not_ meant to be used as an interface, consider removing
+/// the `ABC` base class from the class definition.
 ///
 /// ## Example
 /// ```python
 /// from abc import ABC
+/// from typing import ClassVar
 ///
 ///
 /// class Foo(ABC):
+///     class_var: ClassVar[str] = "assigned"
+///
 ///     def method(self):
 ///         bar()
 /// ```
@@ -34,9 +39,12 @@ use crate::registry::Rule;
 /// Use instead:
 /// ```python
 /// from abc import ABC, abstractmethod
+/// from typing import ClassVar
 ///
 ///
 /// class Foo(ABC):
+///     class_var: ClassVar[str]  # unassigned
+///
 ///     @abstractmethod
 ///     def method(self):
 ///         bar()
@@ -44,8 +52,9 @@ use crate::registry::Rule;
 ///
 /// ## References
 /// - [Python documentation: `abc`](https://docs.python.org/3/library/abc.html)
-#[violation]
-pub struct AbstractBaseClassWithoutAbstractMethod {
+/// - [Python documentation: `typing.ClassVar`](https://docs.python.org/3/library/typing.html#typing.ClassVar)
+#[derive(ViolationMetadata)]
+pub(crate) struct AbstractBaseClassWithoutAbstractMethod {
     name: String,
 }
 
@@ -53,45 +62,44 @@ impl Violation for AbstractBaseClassWithoutAbstractMethod {
     #[derive_message_formats]
     fn message(&self) -> String {
         let AbstractBaseClassWithoutAbstractMethod { name } = self;
-        format!("`{name}` is an abstract base class, but it has no abstract methods")
+        format!("`{name}` is an abstract base class, but it has no abstract methods or properties")
     }
 }
+
 /// ## What it does
 /// Checks for empty methods in abstract base classes without an abstract
 /// decorator.
 ///
 /// ## Why is this bad?
-/// Empty methods in abstract base classes without an abstract decorator are
-/// indicative of unfinished code or a mistake.
-///
-/// Instead, add an abstract method decorated to indicate that it is abstract,
-/// or implement the method.
+/// Empty methods in abstract base classes without an abstract decorator may be
+/// be indicative of a mistake. If the method is meant to be abstract, add an
+/// `@abstractmethod` decorator to the method.
 ///
 /// ## Example
+///
 /// ```python
 /// from abc import ABC
 ///
 ///
 /// class Foo(ABC):
-///     def method(self):
-///         ...
+///     def method(self): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// from abc import ABC, abstractmethod
 ///
 ///
 /// class Foo(ABC):
 ///     @abstractmethod
-///     def method(self):
-///         ...
+///     def method(self): ...
 /// ```
 ///
 /// ## References
-/// - [Python documentation: abc](https://docs.python.org/3/library/abc.html)
-#[violation]
-pub struct EmptyMethodWithoutAbstractDecorator {
+/// - [Python documentation: `abc`](https://docs.python.org/3/library/abc.html)
+#[derive(ViolationMetadata)]
+pub(crate) struct EmptyMethodWithoutAbstractDecorator {
     name: String,
 }
 
@@ -109,12 +117,14 @@ fn is_abc_class(bases: &[Expr], keywords: &[Keyword], semantic: &SemanticModel) 
     keywords.iter().any(|keyword| {
         keyword.arg.as_ref().is_some_and(|arg| arg == "metaclass")
             && semantic
-                .resolve_call_path(&keyword.value)
-                .is_some_and(|call_path| matches!(call_path.as_slice(), ["abc", "ABCMeta"]))
+                .resolve_qualified_name(&keyword.value)
+                .is_some_and(|qualified_name| {
+                    matches!(qualified_name.segments(), ["abc", "ABCMeta"])
+                })
     }) || bases.iter().any(|base| {
         semantic
-            .resolve_call_path(base)
-            .is_some_and(|call_path| matches!(call_path.as_slice(), ["abc", "ABC"]))
+            .resolve_qualified_name(base)
+            .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["abc", "ABC"]))
     })
 }
 
@@ -134,7 +144,7 @@ fn is_empty_body(body: &[Stmt]) -> bool {
 /// B024
 /// B027
 pub(crate) fn abstract_base_class(
-    checker: &mut Checker,
+    checker: &Checker,
     stmt: &Stmt,
     name: &str,
     arguments: Option<&Arguments>,
@@ -154,8 +164,13 @@ pub(crate) fn abstract_base_class(
     let mut has_abstract_method = false;
     for stmt in body {
         // https://github.com/PyCQA/flake8-bugbear/issues/293
-        // Ignore abc's that declares a class attribute that must be set
-        if let Stmt::AnnAssign(_) | Stmt::Assign(_) = stmt {
+        // If an ABC declares an attribute by providing a type annotation
+        // but does not actually assign a value for that attribute,
+        // assume it is intended to be an "abstract attribute"
+        if matches!(
+            stmt,
+            Stmt::AnnAssign(ast::StmtAnnAssign { value: None, .. })
+        ) {
             has_abstract_method = true;
             continue;
         }
@@ -181,7 +196,7 @@ pub(crate) fn abstract_base_class(
             && is_empty_body(body)
             && !is_overload(decorator_list, checker.semantic())
         {
-            checker.diagnostics.push(Diagnostic::new(
+            checker.report_diagnostic(Diagnostic::new(
                 EmptyMethodWithoutAbstractDecorator {
                     name: format!("{name}.{method_name}"),
                 },
@@ -191,7 +206,7 @@ pub(crate) fn abstract_base_class(
     }
     if checker.enabled(Rule::AbstractBaseClassWithoutAbstractMethod) {
         if !has_abstract_method {
-            checker.diagnostics.push(Diagnostic::new(
+            checker.report_diagnostic(Diagnostic::new(
                 AbstractBaseClassWithoutAbstractMethod {
                     name: name.to_string(),
                 },

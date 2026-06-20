@@ -1,23 +1,22 @@
-use std::path::Path;
-
 use itertools::{EitherOrBoth, Itertools};
 
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::whitespace::trailing_lines_end;
 use ruff_python_ast::{PySourceType, Stmt};
 use ruff_python_codegen::Stylist;
 use ruff_python_index::Indexer;
+use ruff_python_parser::Tokens;
 use ruff_python_trivia::{leading_indentation, textwrap::indent, PythonWhitespace};
-use ruff_source_file::{Locator, UniversalNewlines};
+use ruff_source_file::{LineRanges, UniversalNewlines};
 use ruff_text_size::{Ranged, TextRange};
-
-use crate::line_width::LineWidthBuilder;
-
-use crate::settings::LinterSettings;
 
 use super::super::block::Block;
 use super::super::{comments, format_imports};
+use crate::line_width::LineWidthBuilder;
+use crate::package::PackageRoot;
+use crate::settings::LinterSettings;
+use crate::Locator;
 
 /// ## What it does
 /// De-duplicates, groups, and sorts imports based on the provided `isort` settings.
@@ -37,15 +36,15 @@ use super::super::{comments, format_imports};
 /// import numpy as np
 /// import pandas
 /// ```
-#[violation]
-pub struct UnsortedImports;
+#[derive(ViolationMetadata)]
+pub(crate) struct UnsortedImports;
 
 impl Violation for UnsortedImports {
     const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Import block is un-sorted or un-formatted")
+        "Import block is un-sorted or un-formatted".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
@@ -78,7 +77,7 @@ fn matches_ignoring_indentation(val1: &str, val2: &str) -> bool {
         })
 }
 
-#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_sign_loss, clippy::too_many_arguments)]
 /// I001
 pub(crate) fn organize_imports(
     block: &Block,
@@ -86,8 +85,9 @@ pub(crate) fn organize_imports(
     stylist: &Stylist,
     indexer: &Indexer,
     settings: &LinterSettings,
-    package: Option<&Path>,
+    package: Option<PackageRoot<'_>>,
     source_type: PySourceType,
+    tokens: &Tokens,
 ) -> Option<Diagnostic> {
     let indentation = locator.slice(extract_indentation_range(&block.imports, locator));
     let indentation = leading_indentation(indentation);
@@ -96,8 +96,9 @@ pub(crate) fn organize_imports(
 
     // Special-cases: there's leading or trailing content in the import block. These
     // are too hard to get right, and relatively rare, so flag but don't fix.
-    if indexer.preceded_by_multi_statement_line(block.imports.first().unwrap(), locator)
-        || indexer.followed_by_multi_statement_line(block.imports.last().unwrap(), locator)
+    if indexer.preceded_by_multi_statement_line(block.imports.first().unwrap(), locator.contents())
+        || indexer
+            .followed_by_multi_statement_line(block.imports.last().unwrap(), locator.contents())
     {
         return Some(Diagnostic::new(UnsortedImports, range));
     }
@@ -106,13 +107,13 @@ pub(crate) fn organize_imports(
     let comments = comments::collect_comments(
         TextRange::new(range.start(), locator.full_line_end(range.end())),
         locator,
-        indexer,
+        indexer.comment_ranges(),
     );
 
     let trailing_line_end = if block.trailer.is_none() {
         locator.full_line_end(range.end())
     } else {
-        trailing_lines_end(block.imports.last().unwrap(), locator)
+        trailing_lines_end(block.imports.last().unwrap(), locator.contents())
     };
 
     // Generate the sorted import block.
@@ -128,19 +129,19 @@ pub(crate) fn organize_imports(
         source_type,
         settings.target_version,
         &settings.isort,
+        tokens,
     );
 
     // Expand the span the entire range, including leading and trailing space.
-    let range = TextRange::new(locator.line_start(range.start()), trailing_line_end);
-    let actual = locator.slice(range);
+    let fix_range = TextRange::new(locator.line_start(range.start()), trailing_line_end);
+    let actual = locator.slice(fix_range);
     if matches_ignoring_indentation(actual, &expected) {
         return None;
     }
-
     let mut diagnostic = Diagnostic::new(UnsortedImports, range);
     diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
         indent(&expected, indentation).to_string(),
-        range,
+        fix_range,
     )));
     Some(diagnostic)
 }

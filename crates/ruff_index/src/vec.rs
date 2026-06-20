@@ -69,6 +69,19 @@ impl<I: Idx, T> IndexVec<I, T> {
     pub fn next_index(&self) -> I {
         I::new(self.raw.len())
     }
+
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.raw.shrink_to_fit();
+    }
+
+    #[inline]
+    pub fn resize(&mut self, new_len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.raw.resize(new_len, value);
+    }
 }
 
 impl<I, T> Debug for IndexVec<I, T>
@@ -168,3 +181,16 @@ impl<I: Idx, T, const N: usize> From<[T; N]> for IndexVec<I, T> {
 // not the phantom data.
 #[allow(unsafe_code)]
 unsafe impl<I: Idx, T> Send for IndexVec<I, T> where T: Send {}
+
+#[allow(unsafe_code)]
+#[cfg(feature = "salsa")]
+unsafe impl<I, T> salsa::Update for IndexVec<I, T>
+where
+    T: salsa::Update,
+{
+    #[allow(unsafe_code)]
+    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+        let old_vec: &mut IndexVec<I, T> = unsafe { &mut *old_pointer };
+        salsa::Update::maybe_update(&mut old_vec.raw, new_value.raw)
+    }
+}

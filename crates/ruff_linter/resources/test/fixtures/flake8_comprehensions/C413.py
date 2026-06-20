@@ -14,9 +14,16 @@ reversed(sorted(x, reverse=not x))
 reversed(sorted(i for i in range(42)))
 reversed(sorted((i for i in range(42)), reverse=True))
 
+# Regression test for: https://github.com/astral-sh/ruff/issues/10335
+reversed(sorted([1, 2, 3], reverse=False or True))
+reversed(sorted([1, 2, 3], reverse=(False or True)))
 
-def reversed(*args, **kwargs):
-    return None
-
-
-reversed(sorted(x, reverse=True))
+# These fixes need to be parenthesized to avoid syntax errors and behavior
+# changes.
+# See https://github.com/astral-sh/ruff/issues/15789
+reversed(sorted
+(""))
+list(sorted
+    (""))
+list(sorted
+("xy"))

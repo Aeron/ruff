@@ -4,8 +4,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ruff_cli::check;
-use ruff_linter::logging::{set_up_logging, LogLevel};
+use ruff::{args::GlobalConfigArgs, check};
+use ruff_linter::logging::set_up_logging;
 use std::process::ExitCode;
 
 mod format_dev;
@@ -13,6 +13,7 @@ mod generate_all;
 mod generate_cli_help;
 mod generate_docs;
 mod generate_json_schema;
+mod generate_knot_schema;
 mod generate_options;
 mod generate_rules_table;
 mod print_ast;
@@ -28,6 +29,8 @@ const ROOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
 struct Args {
     #[command(subcommand)]
     command: Command,
+    #[clap(flatten)]
+    global_options: GlobalConfigArgs,
 }
 
 #[derive(Subcommand)]
@@ -37,6 +40,8 @@ enum Command {
     GenerateAll(generate_all::Args),
     /// Generate JSON schema for the TOML configuration file.
     GenerateJSONSchema(generate_json_schema::Args),
+    /// Generate JSON schema for the Red Knot TOML configuration file.
+    GenerateKnotSchema(generate_knot_schema::Args),
     /// Generate a Markdown-compatible table of supported lint rules.
     GenerateRulesTable,
     /// Generate a Markdown-compatible listing of configuration options.
@@ -56,9 +61,7 @@ enum Command {
     /// Run a ruff command n times for profiling/benchmarking
     Repeat {
         #[clap(flatten)]
-        args: ruff_cli::args::CheckCommand,
-        #[clap(flatten)]
-        log_level_args: ruff_cli::args::LogLevelArgs,
+        args: ruff::args::CheckCommand,
         /// Run this many times
         #[clap(long)]
         repeat: usize,
@@ -75,11 +78,15 @@ enum Command {
 }
 
 fn main() -> Result<ExitCode> {
-    let args = Args::parse();
+    let Args {
+        command,
+        global_options,
+    } = Args::parse();
     #[allow(clippy::print_stdout)]
-    match args.command {
+    match command {
         Command::GenerateAll(args) => generate_all::main(&args)?,
         Command::GenerateJSONSchema(args) => generate_json_schema::main(&args)?,
+        Command::GenerateKnotSchema(args) => generate_knot_schema::main(&args)?,
         Command::GenerateRulesTable => println!("{}", generate_rules_table::generate()),
         Command::GenerateOptions => println!("{}", generate_options::generate()),
         Command::GenerateCliHelp(args) => generate_cli_help::main(&args)?,
@@ -89,14 +96,12 @@ fn main() -> Result<ExitCode> {
         Command::PrintTokens(args) => print_tokens::main(&args)?,
         Command::RoundTrip(args) => round_trip::main(&args)?,
         Command::Repeat {
-            args,
+            args: subcommand_args,
             repeat,
-            log_level_args,
         } => {
-            let log_level = LogLevel::from(&log_level_args);
-            set_up_logging(&log_level)?;
+            set_up_logging(global_options.log_level())?;
             for _ in 0..repeat {
-                check(args.clone(), log_level)?;
+                check(subcommand_args.clone(), global_options.clone())?;
             }
         }
         Command::FormatDev(args) => {

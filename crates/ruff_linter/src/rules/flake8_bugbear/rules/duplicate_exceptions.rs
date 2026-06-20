@@ -1,13 +1,12 @@
 use itertools::Itertools;
-use ruff_python_ast::{self as ast, ExceptHandler, Expr, ExprContext};
-use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use ruff_diagnostics::{AlwaysFixableViolation, Violation};
 use ruff_diagnostics::{Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::call_path;
-use ruff_python_ast::call_path::CallPath;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::name::UnqualifiedName;
+use ruff_python_ast::{self as ast, ExceptHandler, Expr, ExprContext};
+use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
 use crate::fix::edits::pad;
@@ -40,16 +39,21 @@ use crate::registry::Rule;
 ///
 /// ## References
 /// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
-#[violation]
-pub struct DuplicateTryBlockException {
+#[derive(ViolationMetadata)]
+pub(crate) struct DuplicateTryBlockException {
     name: String,
+    is_star: bool,
 }
 
 impl Violation for DuplicateTryBlockException {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let DuplicateTryBlockException { name } = self;
-        format!("try-except block with duplicate exception `{name}`")
+        let DuplicateTryBlockException { name, is_star } = self;
+        if *is_star {
+            format!("try-except* block with duplicate exception `{name}`")
+        } else {
+            format!("try-except block with duplicate exception `{name}`")
+        }
     }
 }
 
@@ -82,8 +86,8 @@ impl Violation for DuplicateTryBlockException {
 /// ## References
 /// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
 /// - [Python documentation: Exception hierarchy](https://docs.python.org/3/library/exceptions.html#exception-hierarchy)
-#[violation]
-pub struct DuplicateHandlerException {
+#[derive(ViolationMetadata)]
+pub(crate) struct DuplicateHandlerException {
     pub names: Vec<String>,
 }
 
@@ -109,25 +113,26 @@ fn type_pattern(elts: Vec<&Expr>) -> Expr {
         elts: elts.into_iter().cloned().collect(),
         ctx: ExprContext::Load,
         range: TextRange::default(),
+        parenthesized: true,
     }
     .into()
 }
 
 /// B014
 fn duplicate_handler_exceptions<'a>(
-    checker: &mut Checker,
+    checker: &Checker,
     expr: &'a Expr,
     elts: &'a [Expr],
-) -> FxHashMap<CallPath<'a>, &'a Expr> {
-    let mut seen: FxHashMap<CallPath, &Expr> = FxHashMap::default();
-    let mut duplicates: FxHashSet<CallPath> = FxHashSet::default();
+) -> FxHashMap<UnqualifiedName<'a>, &'a Expr> {
+    let mut seen: FxHashMap<UnqualifiedName, &Expr> = FxHashMap::default();
+    let mut duplicates: FxHashSet<UnqualifiedName> = FxHashSet::default();
     let mut unique_elts: Vec<&Expr> = Vec::default();
     for type_ in elts {
-        if let Some(call_path) = call_path::collect_call_path(type_) {
-            if seen.contains_key(&call_path) {
-                duplicates.insert(call_path);
+        if let Some(name) = UnqualifiedName::from_expr(type_) {
+            if seen.contains_key(&name) {
+                duplicates.insert(name);
             } else {
-                seen.entry(call_path).or_insert(type_);
+                seen.entry(name).or_insert(type_);
                 unique_elts.push(type_);
             }
         }
@@ -140,7 +145,7 @@ fn duplicate_handler_exceptions<'a>(
                 DuplicateHandlerException {
                     names: duplicates
                         .into_iter()
-                        .map(|call_path| call_path.join("."))
+                        .map(|qualified_name| qualified_name.segments().join("."))
                         .sorted()
                         .collect::<Vec<String>>(),
                 },
@@ -162,7 +167,7 @@ fn duplicate_handler_exceptions<'a>(
                 },
                 expr.range(),
             )));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 
@@ -170,9 +175,9 @@ fn duplicate_handler_exceptions<'a>(
 }
 
 /// B025
-pub(crate) fn duplicate_exceptions(checker: &mut Checker, handlers: &[ExceptHandler]) {
-    let mut seen: FxHashSet<CallPath> = FxHashSet::default();
-    let mut duplicates: FxHashMap<CallPath, Vec<&Expr>> = FxHashMap::default();
+pub(crate) fn duplicate_exceptions(checker: &Checker, handlers: &[ExceptHandler]) {
+    let mut seen: FxHashSet<UnqualifiedName> = FxHashSet::default();
+    let mut duplicates: FxHashMap<UnqualifiedName, Vec<&Expr>> = FxHashMap::default();
     for handler in handlers {
         let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
             type_: Some(type_),
@@ -183,11 +188,11 @@ pub(crate) fn duplicate_exceptions(checker: &mut Checker, handlers: &[ExceptHand
         };
         match type_.as_ref() {
             Expr::Attribute(_) | Expr::Name(_) => {
-                if let Some(call_path) = call_path::collect_call_path(type_) {
-                    if seen.contains(&call_path) {
-                        duplicates.entry(call_path).or_default().push(type_);
+                if let Some(name) = UnqualifiedName::from_expr(type_) {
+                    if seen.contains(&name) {
+                        duplicates.entry(name).or_default().push(type_);
                     } else {
-                        seen.insert(call_path);
+                        seen.insert(name);
                     }
                 }
             }
@@ -207,9 +212,15 @@ pub(crate) fn duplicate_exceptions(checker: &mut Checker, handlers: &[ExceptHand
     if checker.enabled(Rule::DuplicateTryBlockException) {
         for (name, exprs) in duplicates {
             for expr in exprs {
-                checker.diagnostics.push(Diagnostic::new(
+                let is_star = checker
+                    .semantic()
+                    .current_statement()
+                    .as_try_stmt()
+                    .is_some_and(|try_stmt| try_stmt.is_star);
+                checker.report_diagnostic(Diagnostic::new(
                     DuplicateTryBlockException {
-                        name: name.join("."),
+                        name: name.segments().join("."),
+                        is_star,
                     },
                     expr.range(),
                 ));

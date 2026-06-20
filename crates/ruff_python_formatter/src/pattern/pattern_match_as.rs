@@ -2,7 +2,7 @@ use ruff_formatter::write;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::PatternMatchAs;
 
-use crate::comments::{dangling_comments, SourceComment};
+use crate::comments::dangling_comments;
 use crate::expression::parentheses::{NeedsParentheses, OptionalParentheses};
 use crate::prelude::*;
 
@@ -48,14 +48,6 @@ impl FormatNodeRule<PatternMatchAs> for FormatPatternMatchAs {
             token("_").fmt(f)
         }
     }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        Ok(())
-    }
 }
 
 impl NeedsParentheses for PatternMatchAs {
@@ -64,6 +56,10 @@ impl NeedsParentheses for PatternMatchAs {
         _parent: AnyNodeRef,
         _context: &PyFormatContext,
     ) -> OptionalParentheses {
-        OptionalParentheses::Multiline
+        if self.name.is_some() {
+            OptionalParentheses::Multiline
+        } else {
+            OptionalParentheses::BestFit
+        }
     }
 }

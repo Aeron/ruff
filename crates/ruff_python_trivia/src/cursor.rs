@@ -5,6 +5,8 @@ use ruff_text_size::{TextLen, TextSize};
 pub const EOF_CHAR: char = '\0';
 
 /// A [`Cursor`] over a string.
+///
+/// Based on [`rustc`'s `Cursor`](https://github.com/rust-lang/rust/blob/d1b7355d3d7b4ead564dbecb1d240fcc74fff21b/compiler/rustc_lexer/src/cursor.rs)
 #[derive(Debug, Clone)]
 pub struct Cursor<'a> {
     chars: Chars<'a>,
@@ -22,6 +24,16 @@ impl<'a> Cursor<'a> {
     /// Return the remaining input as a string slice.
     pub fn chars(&self) -> Chars<'a> {
         self.chars.clone()
+    }
+
+    /// Returns the remaining input as byte slice.
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.as_str().as_bytes()
+    }
+
+    /// Returns the remaining input as string slice.
+    pub fn as_str(&self) -> &'a str {
+        self.chars.as_str()
     }
 
     /// Peeks the next character from the input stream without consuming it.
@@ -44,10 +56,8 @@ impl<'a> Cursor<'a> {
         self.chars.clone().next_back().unwrap_or(EOF_CHAR)
     }
 
-    // SAFETY: The `source.text_len` call in `new` would panic if the string length is larger than a `u32`.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn text_len(&self) -> TextSize {
-        TextSize::new(self.chars.as_str().len() as u32)
+        self.chars.as_str().text_len()
     }
 
     pub fn token_len(&self) -> TextSize {
@@ -82,9 +92,31 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    /// Eats the next two characters if they are `c1` and `c2`. Does not
+    /// consume any input otherwise, even if the first character matches.
+    pub fn eat_char2(&mut self, c1: char, c2: char) -> bool {
+        if self.first() == c1 && self.second() == c2 {
+            self.bump();
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn eat_char_back(&mut self, c: char) -> bool {
         if self.last() == c {
             self.bump_back();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Eats the next character if `predicate` returns `true`.
+    pub fn eat_if(&mut self, mut predicate: impl FnMut(char) -> bool) -> bool {
+        if predicate(self.first()) && !self.is_eof() {
+            self.bump();
             true
         } else {
             false
@@ -107,5 +139,14 @@ impl<'a> Cursor<'a> {
         while predicate(self.last()) && !self.is_eof() {
             self.bump_back();
         }
+    }
+
+    /// Skips the next `count` bytes.
+    ///
+    /// ## Panics
+    ///  - If `count` is larger than the remaining bytes in the input stream.
+    ///  - If `count` indexes into a multi-byte character.
+    pub fn skip_bytes(&mut self, count: usize) {
+        self.chars = self.chars.as_str()[count..].chars();
     }
 }

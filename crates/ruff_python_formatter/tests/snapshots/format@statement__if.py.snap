@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_python_formatter/tests/fixtures.rs
 input_file: crates/ruff_python_formatter/resources/test/fixtures/ruff/statement/if.py
+snapshot_kind: text
 ---
 ## Input
 ```python
@@ -609,4 +610,22 @@ if parent_body:
 ```
 
 
-
+## Preview changes
+```diff
+--- Stable
++++ Preview
+@@ -93,11 +93,13 @@
+     def f():
+         pass
+         # 1
++
+ elif True:
+ 
+     def f():
+         pass
+         # 2
++
+ else:
+ 
+     def f():
+```

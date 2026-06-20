@@ -1,8 +1,7 @@
 use ruff_formatter::{write, FormatRuleWithOptions};
-use ruff_python_ast::{AnyNodeRef, AstNode};
+use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::{Expr, ExprSubscript};
 
-use crate::comments::SourceComment;
 use crate::expression::expr_tuple::TupleParentheses;
 use crate::expression::parentheses::{
     is_expression_parenthesized, parenthesized, NeedsParentheses, OptionalParentheses, Parentheses,
@@ -36,7 +35,7 @@ impl FormatNodeRule<ExprSubscript> for FormatExprSubscript {
         let call_chain_layout = self.call_chain_layout.apply_in_node(item, f);
 
         let comments = f.context().comments().clone();
-        let dangling_comments = comments.dangling(item.as_any_node_ref());
+        let dangling_comments = comments.dangling(item);
         debug_assert!(
             dangling_comments.len() <= 1,
             "A subscript expression can only have a single dangling comment, the one after the bracket"
@@ -79,15 +78,6 @@ impl FormatNodeRule<ExprSubscript> for FormatExprSubscript {
             write!(f, [format_inner])
         }
     }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Handled inside of `fmt_fields`
-        Ok(())
-    }
 }
 
 impl NeedsParentheses for ExprSubscript {
@@ -113,19 +103,26 @@ impl NeedsParentheses for ExprSubscript {
             } else {
                 match self.value.needs_parentheses(self.into(), context) {
                     OptionalParentheses::BestFit => {
-                        if parent.as_stmt_function_def().is_some_and(|function_def| {
-                            function_def
-                                .returns
-                                .as_deref()
-                                .and_then(Expr::as_subscript_expr)
-                                == Some(self)
-                        }) {
-                            // Don't use the best fitting layout for return type annotation because it results in the
-                            // return type expanding before the parameters.
-                            OptionalParentheses::Never
-                        } else {
-                            OptionalParentheses::BestFit
+                        if let Some(function) = parent.as_stmt_function_def() {
+                            if function.returns.as_deref().is_some_and(|returns| {
+                                AnyNodeRef::ptr_eq(returns.into(), self.into())
+                            }) {
+                                if function.parameters.is_empty()
+                                    && !context.comments().has(&*function.parameters)
+                                {
+                                    // Apply the `optional_parentheses` layout when the subscript
+                                    // is in a return type position of a function without parameters.
+                                    // This ensures the subscript is parenthesized if it has a very
+                                    // long name that goes over the line length limit.
+                                    return OptionalParentheses::Multiline;
+                                }
+
+                                // Don't use the best fitting layout for return type annotation because it results in the
+                                // return type expanding before the parameters.
+                                return OptionalParentheses::Never;
+                            }
                         }
+                        OptionalParentheses::BestFit
                     }
                     parentheses => parentheses,
                 }

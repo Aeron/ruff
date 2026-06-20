@@ -2,13 +2,10 @@ use std::path::Path;
 
 use bitflags::bitflags;
 use rustc_hash::FxHashMap;
-use smallvec::smallvec;
 
-use ruff_python_ast::call_path::{collect_call_path, from_unqualified_name, CallPath};
 use ruff_python_ast::helpers::from_relative_import;
-use ruff_python_ast::{self as ast, Expr, Operator, Stmt};
-use ruff_python_stdlib::path::is_python_stub_file;
-use ruff_python_stdlib::typing::is_typing_extension;
+use ruff_python_ast::name::{QualifiedName, UnqualifiedName};
+use ruff_python_ast::{self as ast, Expr, ExprContext, PySourceType, Stmt};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::binding::{
@@ -27,10 +24,12 @@ use crate::reference::{
 use crate::scope::{Scope, ScopeId, ScopeKind, Scopes};
 use crate::Imported;
 
+pub mod all;
+
 /// A semantic model for a Python module, to enable querying the module's semantic information.
 pub struct SemanticModel<'a> {
     typing_modules: &'a [String],
-    module_path: Option<&'a [String]>,
+    module: Module<'a>,
 
     /// Stack of all AST nodes in the program.
     nodes: Nodes<'a>,
@@ -121,7 +120,24 @@ pub struct SemanticModel<'a> {
     /// Flags for the semantic model.
     pub flags: SemanticModelFlags,
 
-    /// Exceptions that have been handled by the current scope.
+    /// Modules that have been seen by the semantic model.
+    pub seen: Modules,
+
+    /// Exceptions that are handled by the current `try` block.
+    ///
+    /// For example, if we're visiting the `x = 1` assignment below,
+    /// `AttributeError` is considered to be a "handled exception",
+    /// but `TypeError` is not:
+    ///
+    /// ```py
+    /// try:
+    ///     try:
+    ///         foo()
+    ///     except TypeError:
+    ///         pass
+    /// except AttributeError:
+    ///     pass
+    /// ```
     pub handled_exceptions: Vec<Exceptions>,
 
     /// Map from [`ast::ExprName`] node (represented as a [`NameId`]) to the [`Binding`] to which
@@ -130,10 +146,10 @@ pub struct SemanticModel<'a> {
 }
 
 impl<'a> SemanticModel<'a> {
-    pub fn new(typing_modules: &'a [String], path: &'a Path, module: Module<'a>) -> Self {
+    pub fn new(typing_modules: &'a [String], path: &Path, module: Module<'a>) -> Self {
         Self {
             typing_modules,
-            module_path: module.path(),
+            module,
             nodes: Nodes::default(),
             node_id: None,
             branches: Branches::default(),
@@ -150,6 +166,7 @@ impl<'a> SemanticModel<'a> {
             delayed_annotations: FxHashMap::default(),
             rebinding_scopes: FxHashMap::default(),
             flags: SemanticModelFlags::new(path),
+            seen: Modules::empty(),
             handled_exceptions: Vec::default(),
             resolved_names: FxHashMap::default(),
         }
@@ -157,7 +174,7 @@ impl<'a> SemanticModel<'a> {
 
     /// Return the [`Binding`] for the given [`BindingId`].
     #[inline]
-    pub fn binding(&self, id: BindingId) -> &Binding {
+    pub fn binding(&self, id: BindingId) -> &Binding<'a> {
         &self.bindings[id]
     }
 
@@ -169,30 +186,30 @@ impl<'a> SemanticModel<'a> {
 
     /// Return `true` if the `Expr` is a reference to `typing.${target}`.
     pub fn match_typing_expr(&self, expr: &Expr, target: &str) -> bool {
-        self.resolve_call_path(expr)
-            .is_some_and(|call_path| self.match_typing_call_path(&call_path, target))
+        self.seen_typing()
+            && self
+                .resolve_qualified_name(expr)
+                .is_some_and(|qualified_name| {
+                    self.match_typing_qualified_name(&qualified_name, target)
+                })
     }
 
     /// Return `true` if the call path is a reference to `typing.${target}`.
-    pub fn match_typing_call_path(&self, call_path: &CallPath, target: &str) -> bool {
-        if call_path.as_slice() == ["typing", target] {
+    pub fn match_typing_qualified_name(
+        &self,
+        qualified_name: &QualifiedName,
+        target: &str,
+    ) -> bool {
+        if matches!(
+            qualified_name.segments(),
+            ["typing" | "_typeshed" | "typing_extensions", member] if *member == target
+        ) {
             return true;
-        }
-
-        if call_path.as_slice() == ["_typeshed", target] {
-            return true;
-        }
-
-        if is_typing_extension(target) {
-            if call_path.as_slice() == ["typing_extensions", target] {
-                return true;
-            }
         }
 
         if self.typing_modules.iter().any(|module| {
-            let mut module: CallPath = from_unqualified_name(module);
-            module.push(target);
-            *call_path == module
+            let module = QualifiedName::from_dotted_name(module);
+            qualified_name == &module.append_member(target)
         }) {
             return true;
         }
@@ -201,7 +218,7 @@ impl<'a> SemanticModel<'a> {
     }
 
     /// Return an iterator over the set of `typing` modules allowed in the semantic model.
-    pub fn typing_modules(&self) -> impl Iterator<Item = &str> {
+    pub fn typing_modules(&self) -> impl Iterator<Item = &'a str> {
         ["typing", "_typeshed", "typing_extensions"]
             .iter()
             .copied()
@@ -248,17 +265,84 @@ impl<'a> SemanticModel<'a> {
         self.shadowed_bindings.get(&binding_id).copied()
     }
 
-    /// Return `true` if `member` is bound as a builtin.
-    pub fn is_builtin(&self, member: &str) -> bool {
-        self.lookup_symbol(member)
+    /// Return `true` if `member` is bound as a builtin *in the scope we are currently visiting*.
+    ///
+    /// Note that a "builtin binding" does *not* include explicit lookups via the `builtins`
+    /// module, e.g. `import builtins; builtins.open`. It *only* includes the bindings
+    /// that are pre-populated in Python's global scope before any imports have taken place.
+    pub fn has_builtin_binding(&self, member: &str) -> bool {
+        self.has_builtin_binding_in_scope(member, self.scope_id)
+    }
+
+    /// Return `true` if `member` is bound as a builtin *in a given scope*.
+    ///
+    /// Note that a "builtin binding" does *not* include explicit lookups via the `builtins`
+    /// module, e.g. `import builtins; builtins.open`. It *only* includes the bindings
+    /// that are pre-populated in Python's global scope before any imports have taken place.
+    pub fn has_builtin_binding_in_scope(&self, member: &str, scope: ScopeId) -> bool {
+        self.lookup_symbol_in_scope(member, scope, false)
             .map(|binding_id| &self.bindings[binding_id])
             .is_some_and(|binding| binding.kind.is_builtin())
     }
 
+    /// If `expr` is a reference to a builtins symbol,
+    /// return the name of that symbol. Else, return `None`.
+    ///
+    /// This method returns `true` both for "builtin bindings"
+    /// (present even without any imports, e.g. `open()`), and for explicit lookups
+    /// via the `builtins` module (e.g. `import builtins; builtins.open()`).
+    pub fn resolve_builtin_symbol<'expr>(&'a self, expr: &'expr Expr) -> Option<&'a str>
+    where
+        'expr: 'a,
+    {
+        // Fast path: we only need to worry about name expressions
+        if !self.seen_module(Modules::BUILTINS) {
+            let name = &expr.as_name_expr()?.id;
+            return if self.has_builtin_binding(name) {
+                Some(name)
+            } else {
+                None
+            };
+        }
+
+        // Slow path: we have to consider names and attributes
+        let qualified_name = self.resolve_qualified_name(expr)?;
+        match qualified_name.segments() {
+            ["" | "builtins", name] => Some(*name),
+            _ => None,
+        }
+    }
+
+    /// Return `true` if `expr` is a reference to `builtins.$target`,
+    /// i.e. either `object` (where `object` is not overridden in the global scope),
+    /// or `builtins.object` (where `builtins` is imported as a module at the top level)
+    pub fn match_builtin_expr(&self, expr: &Expr, symbol: &str) -> bool {
+        debug_assert!(!symbol.contains('.'));
+        // fast path with more short-circuiting
+        if !self.seen_module(Modules::BUILTINS) {
+            let Expr::Name(ast::ExprName { id, .. }) = expr else {
+                return false;
+            };
+            return id == symbol && self.has_builtin_binding(symbol);
+        }
+
+        // slow path: we need to consider attribute accesses and aliased imports
+        let Some(qualified_name) = self.resolve_qualified_name(expr) else {
+            return false;
+        };
+        matches!(qualified_name.segments(), ["" | "builtins", name] if *name == symbol)
+    }
+
     /// Return `true` if `member` is an "available" symbol, i.e., a symbol that has not been bound
-    /// in the current scope, or in any containing scope.
+    /// in the current scope currently being visited, or in any containing scope.
     pub fn is_available(&self, member: &str) -> bool {
-        self.lookup_symbol(member)
+        self.is_available_in_scope(member, self.scope_id)
+    }
+
+    /// Return `true` if `member` is an "available" symbol in a given scope, i.e.,
+    /// a symbol that has not been bound in that current scope, or in any containing scope.
+    pub fn is_available_in_scope(&self, member: &str, scope_id: ScopeId) -> bool {
+        self.lookup_symbol_in_scope(member, scope_id, false)
             .map(|binding_id| &self.bindings[binding_id])
             .map_or(true, |binding| binding.kind.is_builtin())
     }
@@ -269,7 +353,7 @@ impl<'a> SemanticModel<'a> {
             .get(symbol)
             .map_or(true, |binding_id| {
                 // Treat the deletion of a name as a reference to that name.
-                self.add_local_reference(binding_id, range);
+                self.add_local_reference(binding_id, ExprContext::Del, range);
                 self.bindings[binding_id].is_unbound()
             });
 
@@ -291,9 +375,13 @@ impl<'a> SemanticModel<'a> {
             if let Some(binding_id) = self.scopes.global().get(name.id.as_str()) {
                 if !self.bindings[binding_id].is_unbound() {
                     // Mark the binding as used.
-                    let reference_id =
-                        self.resolved_references
-                            .push(ScopeId::global(), name.range, self.flags);
+                    let reference_id = self.resolved_references.push(
+                        ScopeId::global(),
+                        self.node_id,
+                        ExprContext::Load,
+                        self.flags,
+                        name.range,
+                    );
                     self.bindings[binding_id].references.push(reference_id);
 
                     // Mark any submodule aliases as used.
@@ -302,8 +390,10 @@ impl<'a> SemanticModel<'a> {
                     {
                         let reference_id = self.resolved_references.push(
                             ScopeId::global(),
-                            name.range,
+                            self.node_id,
+                            ExprContext::Load,
                             self.flags,
+                            name.range,
                         );
                         self.bindings[binding_id].references.push(reference_id);
                     }
@@ -356,18 +446,26 @@ impl<'a> SemanticModel<'a> {
 
             if let Some(binding_id) = scope.get(name.id.as_str()) {
                 // Mark the binding as used.
-                let reference_id =
-                    self.resolved_references
-                        .push(self.scope_id, name.range, self.flags);
+                let reference_id = self.resolved_references.push(
+                    self.scope_id,
+                    self.node_id,
+                    ExprContext::Load,
+                    self.flags,
+                    name.range,
+                );
                 self.bindings[binding_id].references.push(reference_id);
 
                 // Mark any submodule aliases as used.
                 if let Some(binding_id) =
                     self.resolve_submodule(name.id.as_str(), scope_id, binding_id)
                 {
-                    let reference_id =
-                        self.resolved_references
-                            .push(self.scope_id, name.range, self.flags);
+                    let reference_id = self.resolved_references.push(
+                        self.scope_id,
+                        self.node_id,
+                        ExprContext::Load,
+                        self.flags,
+                        name.range,
+                    );
                     self.bindings[binding_id].references.push(reference_id);
                 }
 
@@ -381,7 +479,10 @@ impl<'a> SemanticModel<'a> {
                     //
                     // The `name` in `print(name)` should be treated as unresolved, but the `name` in
                     // `name: str` should be treated as used.
-                    BindingKind::Annotation => continue,
+                    //
+                    // Stub files are an exception. In a stub file, it _is_ considered valid to
+                    // resolve to a type annotation.
+                    BindingKind::Annotation if !self.in_stub_file() => continue,
 
                     // If it's a deletion, don't treat it as resolved, since the name is now
                     // unbound. For example, given:
@@ -414,6 +515,15 @@ impl<'a> SemanticModel<'a> {
                         return ReadResult::UnboundLocal(binding_id);
                     }
 
+                    BindingKind::ConditionalDeletion(binding_id) => {
+                        self.unresolved_references.push(
+                            name.range,
+                            self.exceptions(),
+                            UnresolvedReferenceFlags::empty(),
+                        );
+                        return ReadResult::UnboundLocal(binding_id);
+                    }
+
                     // If we hit an unbound exception that shadowed a bound name, resole to the
                     // bound name. For example, given:
                     //
@@ -431,9 +541,13 @@ impl<'a> SemanticModel<'a> {
                     // The `x` in `print(x)` should resolve to the `x` in `x = 1`.
                     BindingKind::UnboundException(Some(binding_id)) => {
                         // Mark the binding as used.
-                        let reference_id =
-                            self.resolved_references
-                                .push(self.scope_id, name.range, self.flags);
+                        let reference_id = self.resolved_references.push(
+                            self.scope_id,
+                            self.node_id,
+                            ExprContext::Load,
+                            self.flags,
+                            name.range,
+                        );
                         self.bindings[binding_id].references.push(reference_id);
 
                         // Mark any submodule aliases as used.
@@ -442,12 +556,31 @@ impl<'a> SemanticModel<'a> {
                         {
                             let reference_id = self.resolved_references.push(
                                 self.scope_id,
-                                name.range,
+                                self.node_id,
+                                ExprContext::Load,
                                 self.flags,
+                                name.range,
                             );
                             self.bindings[binding_id].references.push(reference_id);
                         }
 
+                        self.resolved_names.insert(name.into(), binding_id);
+                        return ReadResult::Resolved(binding_id);
+                    }
+
+                    BindingKind::Global(Some(binding_id))
+                    | BindingKind::Nonlocal(binding_id, _) => {
+                        // Mark the shadowed binding as used.
+                        let reference_id = self.resolved_references.push(
+                            self.scope_id,
+                            self.node_id,
+                            ExprContext::Load,
+                            self.flags,
+                            name.range,
+                        );
+                        self.bindings[binding_id].references.push(reference_id);
+
+                        // Treat it as resolved.
                         self.resolved_names.insert(name.into(), binding_id);
                         return ReadResult::Resolved(binding_id);
                     }
@@ -502,10 +635,22 @@ impl<'a> SemanticModel<'a> {
         }
     }
 
-    /// Lookup a symbol in the current scope. This is a carbon copy of [`Self::resolve_load`], but
-    /// doesn't add any read references to the resolved symbol.
+    /// Lookup a symbol in the current scope.
     pub fn lookup_symbol(&self, symbol: &str) -> Option<BindingId> {
-        if self.in_forward_reference() {
+        self.lookup_symbol_in_scope(symbol, self.scope_id, self.in_forward_reference())
+    }
+
+    /// Lookup a symbol in a certain scope
+    ///
+    /// This is a carbon copy of [`Self::resolve_load`], but
+    /// doesn't add any read references to the resolved symbol.
+    pub fn lookup_symbol_in_scope(
+        &self,
+        symbol: &str,
+        scope_id: ScopeId,
+        in_forward_reference: bool,
+    ) -> Option<BindingId> {
+        if in_forward_reference {
             if let Some(binding_id) = self.scopes.global().get(symbol) {
                 if !self.bindings[binding_id].is_unbound() {
                     return Some(binding_id);
@@ -515,7 +660,7 @@ impl<'a> SemanticModel<'a> {
 
         let mut seen_function = false;
         let mut class_variables_visible = true;
-        for (index, scope_id) in self.scopes.ancestor_ids(self.scope_id).enumerate() {
+        for (index, scope_id) in self.scopes.ancestor_ids(scope_id).enumerate() {
             let scope = &self.scopes[scope_id];
             if scope.kind.is_class() {
                 if seen_function && matches!(symbol, "__class__") {
@@ -527,11 +672,13 @@ impl<'a> SemanticModel<'a> {
             }
 
             class_variables_visible = scope.kind.is_type() && index == 0;
+            seen_function |= scope.kind.is_function();
 
             if let Some(binding_id) = scope.get(symbol) {
                 match self.bindings[binding_id].kind {
                     BindingKind::Annotation => continue,
                     BindingKind::Deletion | BindingKind::UnboundException(None) => return None,
+                    BindingKind::ConditionalDeletion(binding_id) => return Some(binding_id),
                     BindingKind::UnboundException(Some(binding_id)) => return Some(binding_id),
                     _ => return Some(binding_id),
                 }
@@ -542,8 +689,173 @@ impl<'a> SemanticModel<'a> {
                     return None;
                 }
             }
+        }
 
+        None
+    }
+
+    /// Simulates a runtime load of a given [`ast::ExprName`].
+    ///
+    /// This should not be run until after all the bindings have been visited.
+    ///
+    /// The main purpose of this method and what makes this different
+    /// from methods like [`SemanticModel::lookup_symbol`] and
+    /// [`SemanticModel::resolve_name`] is that it may be used
+    /// to perform speculative name lookups.
+    ///
+    /// In most cases a load can be accurately modeled simply by calling
+    /// [`SemanticModel::resolve_name`] at the right time during semantic
+    /// analysis, however for speculative lookups this is not the case,
+    /// since we're aiming to change the semantic meaning of our load.
+    /// E.g. we want to check what would happen if we changed a forward
+    /// reference to an immediate load or vice versa.
+    ///
+    /// Use caution when utilizing this method, since it was primarily designed
+    /// to work for speculative lookups from within type definitions, which
+    /// happen to share some nice properties, where attaching each binding
+    /// to a range in the source code and ordering those bindings based on
+    /// that range is a good enough approximation of which bindings are
+    /// available at runtime for which reference.
+    ///
+    /// References from within an [`ast::Comprehension`] can produce incorrect
+    /// results when referring to a [`BindingKind::NamedExprAssignment`].
+    pub fn simulate_runtime_load(
+        &self,
+        name: &ast::ExprName,
+        typing_only_bindings_status: TypingOnlyBindingsStatus,
+    ) -> Option<BindingId> {
+        self.simulate_runtime_load_at_location_in_scope(
+            name.id.as_str(),
+            name.range,
+            self.scope_id,
+            typing_only_bindings_status,
+        )
+    }
+
+    /// Simulates a runtime load of the given symbol.
+    ///
+    /// This should not be run until after all the bindings have been visited.
+    ///
+    /// The main purpose of this method and what makes this different from
+    /// [`SemanticModel::lookup_symbol_in_scope`] is that it may be used to
+    /// perform speculative name lookups.
+    ///
+    /// In most cases a load can be accurately modeled simply by calling
+    /// [`SemanticModel::lookup_symbol`] at the right time during semantic
+    /// analysis, however for speculative lookups this is not the case,
+    /// since we're aiming to change the semantic meaning of our load.
+    /// E.g. we want to check what would happen if we changed a forward
+    /// reference to an immediate load or vice versa.
+    ///
+    /// Use caution when utilizing this method, since it was primarily designed
+    /// to work for speculative lookups from within type definitions, which
+    /// happen to share some nice properties, where attaching each binding
+    /// to a range in the source code and ordering those bindings based on
+    /// that range is a good enough approximation of which bindings are
+    /// available at runtime for which reference.
+    ///
+    /// References from within an [`ast::Comprehension`] can produce incorrect
+    /// results when referring to a [`BindingKind::NamedExprAssignment`].
+    pub fn simulate_runtime_load_at_location_in_scope(
+        &self,
+        symbol: &str,
+        symbol_range: TextRange,
+        scope_id: ScopeId,
+        typing_only_bindings_status: TypingOnlyBindingsStatus,
+    ) -> Option<BindingId> {
+        let mut seen_function = false;
+        let mut class_variables_visible = true;
+        let mut source_order_sensitive_lookup = true;
+        for (index, scope_id) in self.scopes.ancestor_ids(scope_id).enumerate() {
+            let scope = &self.scopes[scope_id];
+
+            // Only once we leave a function scope and its enclosing type scope should
+            // we stop doing source-order lookups. We could e.g. have nested classes
+            // where we lookup symbols from the innermost class scope, which can only see
+            // things from the outer class(es) that have been defined before the inner
+            // class. Source-order lookups take advantage of the fact that most of the
+            // bindings are created sequentially in source order, so if we want to
+            // determine whether or not a given reference can refer to another binding
+            // we can look at their text ranges to check whether or not the binding
+            // could actually be referred to. This is not as robust as back-tracking
+            // the AST, since that can properly take care of the few out-of order
+            // corner-cases, but back-tracking the AST from the reference to the binding
+            // is a lot more expensive than comparing a pair of text ranges.
+            if seen_function && !scope.kind.is_type() {
+                source_order_sensitive_lookup = false;
+            }
+
+            if scope.kind.is_class() {
+                if seen_function && matches!(symbol, "__class__") {
+                    return None;
+                }
+                if !class_variables_visible {
+                    continue;
+                }
+            }
+
+            class_variables_visible = scope.kind.is_type() && index == 0;
             seen_function |= scope.kind.is_function();
+
+            if let Some(binding_id) = scope.get(symbol) {
+                if source_order_sensitive_lookup {
+                    // we need to look through all the shadowed bindings
+                    // since we may be shadowing a source-order accurate
+                    // runtime binding with a source-order inaccurate one
+                    for shadowed_id in scope.shadowed_bindings(binding_id) {
+                        let binding = &self.bindings[shadowed_id];
+                        if typing_only_bindings_status.is_disallowed()
+                            && binding.context.is_typing()
+                        {
+                            continue;
+                        }
+                        if let BindingKind::Annotation
+                        | BindingKind::Deletion
+                        | BindingKind::UnboundException(..)
+                        | BindingKind::ConditionalDeletion(..) = binding.kind
+                        {
+                            continue;
+                        }
+
+                        // This ensures we perform the correct source-order lookup,
+                        // since the ranges for these two types of bindings are trimmed
+                        // to just the target, but the name is not available until the
+                        // end of the entire statement
+                        let binding_range = match binding.statement(self) {
+                            Some(Stmt::Assign(stmt)) => stmt.range(),
+                            Some(Stmt::AnnAssign(stmt)) => stmt.range(),
+                            Some(Stmt::ClassDef(stmt)) => stmt.range(),
+                            _ => binding.range,
+                        };
+
+                        if binding_range.ordering(symbol_range).is_lt() {
+                            return Some(shadowed_id);
+                        }
+                    }
+                } else {
+                    let candidate_id = match self.bindings[binding_id].kind {
+                        BindingKind::Annotation => continue,
+                        BindingKind::Deletion | BindingKind::UnboundException(None) => return None,
+                        BindingKind::ConditionalDeletion(binding_id) => binding_id,
+                        BindingKind::UnboundException(Some(binding_id)) => binding_id,
+                        _ => binding_id,
+                    };
+
+                    if typing_only_bindings_status.is_disallowed()
+                        && self.bindings[candidate_id].context.is_typing()
+                    {
+                        continue;
+                    }
+
+                    return Some(candidate_id);
+                }
+            }
+
+            if index == 0 && scope.kind.is_class() {
+                if matches!(symbol, "__module__" | "__qualname__") {
+                    return None;
+                }
+            }
         }
 
         None
@@ -554,11 +866,11 @@ impl<'a> SemanticModel<'a> {
     /// For example, given `["Class", "method"`], resolve the `BindingKind::ClassDefinition`
     /// associated with `Class`, then the `BindingKind::FunctionDefinition` associated with
     /// `Class.method`.
-    pub fn lookup_attribute(&'a self, value: &'a Expr) -> Option<BindingId> {
-        let call_path = collect_call_path(value)?;
+    pub fn lookup_attribute(&self, value: &Expr) -> Option<BindingId> {
+        let unqualified_name = UnqualifiedName::from_expr(value)?;
 
         // Find the symbol in the current scope.
-        let (symbol, attribute) = call_path.split_first()?;
+        let (symbol, attribute) = unqualified_name.segments().split_first()?;
         let mut binding_id = self.lookup_symbol(symbol)?;
 
         // Recursively resolve class attributes, e.g., `foo.bar.baz` in.
@@ -598,8 +910,8 @@ impl<'a> SemanticModel<'a> {
         }
 
         // Grab, e.g., `pyarrow` from `import pyarrow as pa`.
-        let call_path = import.call_path();
-        let segment = call_path.last()?;
+        let call_path = import.qualified_name();
+        let segment = call_path.segments().last()?;
         if *segment == symbol {
             return None;
         }
@@ -645,8 +957,14 @@ impl<'a> SemanticModel<'a> {
     /// print(python_version)
     /// ```
     ///
-    /// ...then `resolve_call_path(${python_version})` will resolve to `sys.version_info`.
-    pub fn resolve_call_path(&'a self, value: &'a Expr) -> Option<CallPath<'a>> {
+    /// ...then `resolve_qualified_name(${python_version})` will resolve to `sys.version_info`.
+    pub fn resolve_qualified_name<'name, 'expr: 'name>(
+        &self,
+        value: &'expr Expr,
+    ) -> Option<QualifiedName<'name>>
+    where
+        'a: 'name,
+    {
         /// Return the [`ast::ExprName`] at the head of the expression, if any.
         const fn match_head(value: &Expr) -> Option<&ast::ExprName> {
             match value {
@@ -664,45 +982,93 @@ impl<'a> SemanticModel<'a> {
             .map(|id| self.binding(id))?;
 
         match &binding.kind {
-            BindingKind::Import(Import { call_path }) => {
-                let value_path = collect_call_path(value)?;
-                let (_, tail) = value_path.split_first()?;
-                let resolved: CallPath = call_path.iter().chain(tail.iter()).copied().collect();
-                Some(resolved)
-            }
-            BindingKind::SubmoduleImport(SubmoduleImport { call_path }) => {
-                let value_path = collect_call_path(value)?;
-                let (_, tail) = value_path.split_first()?;
-                let resolved: CallPath = call_path
+            BindingKind::Import(Import { qualified_name }) => {
+                let unqualified_name = UnqualifiedName::from_expr(value)?;
+                let (_, tail) = unqualified_name.segments().split_first()?;
+                let resolved: QualifiedName = qualified_name
+                    .segments()
                     .iter()
-                    .take(1)
-                    .chain(tail.iter())
+                    .chain(tail)
                     .copied()
                     .collect();
                 Some(resolved)
             }
-            BindingKind::FromImport(FromImport { call_path }) => {
-                let value_path = collect_call_path(value)?;
-                let (_, tail) = value_path.split_first()?;
+            BindingKind::SubmoduleImport(SubmoduleImport { qualified_name }) => {
+                let value_name = UnqualifiedName::from_expr(value)?;
+                let (_, tail) = value_name.segments().split_first()?;
 
-                let resolved: CallPath =
-                    if call_path.first().map_or(false, |segment| *segment == ".") {
-                        from_relative_import(self.module_path?, call_path, tail)?
+                Some(
+                    qualified_name
+                        .segments()
+                        .iter()
+                        .take(1)
+                        .chain(tail)
+                        .copied()
+                        .collect(),
+                )
+            }
+            BindingKind::FromImport(FromImport { qualified_name }) => {
+                let value_name = UnqualifiedName::from_expr(value)?;
+                let (_, tail) = value_name.segments().split_first()?;
+
+                let resolved: QualifiedName =
+                    if qualified_name.segments().first().copied() == Some(".") {
+                        from_relative_import(
+                            self.module.qualified_name()?,
+                            qualified_name.segments(),
+                            tail,
+                        )?
                     } else {
-                        call_path.iter().chain(tail.iter()).copied().collect()
+                        qualified_name
+                            .segments()
+                            .iter()
+                            .chain(tail)
+                            .copied()
+                            .collect()
                     };
                 Some(resolved)
             }
-            BindingKind::Builtin => Some(smallvec!["", head.id.as_str()]),
+            BindingKind::Builtin => {
+                if value.is_name_expr() {
+                    // Ex) `dict`
+                    Some(QualifiedName::builtin(head.id.as_str()))
+                } else {
+                    // Ex) `dict.__dict__`
+                    let value_name = UnqualifiedName::from_expr(value)?;
+                    Some(
+                        std::iter::once("")
+                            .chain(value_name.segments().iter().copied())
+                            .collect(),
+                    )
+                }
+            }
             BindingKind::ClassDefinition(_) | BindingKind::FunctionDefinition(_) => {
-                let value_path = collect_call_path(value)?;
-                let resolved: CallPath = self
-                    .module_path?
-                    .iter()
-                    .map(String::as_str)
-                    .chain(value_path)
-                    .collect();
-                Some(resolved)
+                // If we have a fully-qualified path for the module, use it.
+                if let Some(path) = self.module.qualified_name() {
+                    Some(
+                        path.iter()
+                            .map(String::as_str)
+                            .chain(
+                                UnqualifiedName::from_expr(value)?
+                                    .segments()
+                                    .iter()
+                                    .copied(),
+                            )
+                            .collect(),
+                    )
+                } else {
+                    // Otherwise, if we're in (e.g.) a script, use the module name.
+                    Some(
+                        std::iter::once(self.module.name()?)
+                            .chain(
+                                UnqualifiedName::from_expr(value)?
+                                    .segments()
+                                    .iter()
+                                    .copied(),
+                            )
+                            .collect(),
+                    )
+                }
             }
             _ => None,
         }
@@ -730,14 +1096,14 @@ impl<'a> SemanticModel<'a> {
         self.current_scopes()
             .enumerate()
             .find_map(|(scope_index, scope)| {
-                scope.bindings().find_map(|(name, binding_id)| {
+                let mut imported_names = scope.bindings().filter_map(|(name, binding_id)| {
                     let binding = &self.bindings[binding_id];
                     match &binding.kind {
                         // Ex) Given `module="sys"` and `object="exit"`:
                         // `import sys`         -> `sys.exit`
                         // `import sys as sys2` -> `sys2.exit`
-                        BindingKind::Import(Import { call_path }) => {
-                            if call_path.as_ref() == module_path.as_slice() {
+                        BindingKind::Import(Import { qualified_name }) => {
+                            if qualified_name.segments() == module_path.as_slice() {
                                 if let Some(source) = binding.source {
                                     // Verify that `sys` isn't bound in an inner scope.
                                     if self
@@ -747,6 +1113,7 @@ impl<'a> SemanticModel<'a> {
                                     {
                                         return Some(ImportedName {
                                             name: format!("{name}.{member}"),
+                                            source,
                                             range: self.nodes[source].range(),
                                             context: binding.context,
                                         });
@@ -757,8 +1124,10 @@ impl<'a> SemanticModel<'a> {
                         // Ex) Given `module="os.path"` and `object="join"`:
                         // `from os.path import join`          -> `join`
                         // `from os.path import join as join2` -> `join2`
-                        BindingKind::FromImport(FromImport { call_path }) => {
-                            if let Some((target_member, target_module)) = call_path.split_last() {
+                        BindingKind::FromImport(FromImport { qualified_name }) => {
+                            if let Some((target_member, target_module)) =
+                                qualified_name.segments().split_last()
+                            {
                                 if target_module == module_path.as_slice()
                                     && target_member == &member
                                 {
@@ -770,7 +1139,8 @@ impl<'a> SemanticModel<'a> {
                                             .all(|scope| !scope.has(name))
                                         {
                                             return Some(ImportedName {
-                                                name: (*name).to_string(),
+                                                name: name.to_string(),
+                                                source,
                                                 range: self.nodes[source].range(),
                                                 context: binding.context,
                                             });
@@ -781,8 +1151,10 @@ impl<'a> SemanticModel<'a> {
                         }
                         // Ex) Given `module="os"` and `object="name"`:
                         // `import os.path ` -> `os.name`
-                        BindingKind::SubmoduleImport(SubmoduleImport { .. }) => {
-                            if name == module {
+                        // Ex) Given `module="os.path"` and `object="join"`:
+                        // `import os.path ` -> `os.path.join`
+                        BindingKind::SubmoduleImport(SubmoduleImport { qualified_name }) => {
+                            if qualified_name.segments().starts_with(&module_path) {
                                 if let Some(source) = binding.source {
                                     // Verify that `os` isn't bound in an inner scope.
                                     if self
@@ -791,7 +1163,8 @@ impl<'a> SemanticModel<'a> {
                                         .all(|scope| !scope.has(name))
                                     {
                                         return Some(ImportedName {
-                                            name: format!("{name}.{member}"),
+                                            name: format!("{module}.{member}"),
+                                            source,
                                             range: self.nodes[source].range(),
                                             context: binding.context,
                                         });
@@ -803,7 +1176,22 @@ impl<'a> SemanticModel<'a> {
                         _ => {}
                     }
                     None
-                })
+                });
+
+                let first = imported_names.next()?;
+                if let Some(second) = imported_names.next() {
+                    // Multiple candidates. We need to sort them because `scope.bindings()` is a HashMap
+                    // which doesn't have a stable iteration order.
+
+                    let mut imports: Vec<_> =
+                        [first, second].into_iter().chain(imported_names).collect();
+                    imports.sort_unstable_by_key(|import| import.range.start());
+
+                    // Return the binding that was imported last.
+                    imports.pop()
+                } else {
+                    Some(first)
+                }
             })
     }
 
@@ -888,7 +1276,7 @@ impl<'a> SemanticModel<'a> {
         let id = self.node_id.expect("No current node");
         self.nodes
             .ancestor_ids(id)
-            .filter_map(move |id| self.nodes[id].as_expression())
+            .map_while(move |id| self.nodes[id].as_expression())
     }
 
     /// Return the current [`Expr`].
@@ -946,7 +1334,7 @@ impl<'a> SemanticModel<'a> {
     }
 
     /// Returns an iterator over all scopes, starting from the current [`Scope`].
-    pub fn current_scopes(&self) -> impl Iterator<Item = &Scope> {
+    pub fn current_scopes(&self) -> impl Iterator<Item = &Scope<'a>> {
         self.scopes.ancestors(self.scope_id)
     }
 
@@ -958,6 +1346,11 @@ impl<'a> SemanticModel<'a> {
     /// Returns the parent of the given [`Scope`], if any.
     pub fn parent_scope(&self, scope: &Scope) -> Option<&Scope<'a>> {
         scope.parent.map(|scope_id| &self.scopes[scope_id])
+    }
+
+    /// Returns the ID of the parent of the given [`ScopeId`], if any.
+    pub fn parent_scope_id(&self, scope_id: ScopeId) -> Option<ScopeId> {
+        self.scopes[scope_id].parent
     }
 
     /// Returns the first parent of the given [`Scope`] that is not of [`ScopeKind::Type`], if any.
@@ -973,10 +1366,38 @@ impl<'a> SemanticModel<'a> {
         None
     }
 
+    /// Returns the first parent of the given [`ScopeId`] that is not of [`ScopeKind::Type`], if any.
+    pub fn first_non_type_parent_scope_id(&self, scope_id: ScopeId) -> Option<ScopeId> {
+        let mut current_scope_id = scope_id;
+        while let Some(parent_id) = self.parent_scope_id(current_scope_id) {
+            if self.scopes[parent_id].kind.is_type() {
+                current_scope_id = parent_id;
+            } else {
+                return Some(parent_id);
+            }
+        }
+        None
+    }
+
     /// Return the [`Stmt`] corresponding to the given [`NodeId`].
     #[inline]
     pub fn node(&self, node_id: NodeId) -> &NodeRef<'a> {
         &self.nodes[node_id]
+    }
+
+    /// Given a [`NodeId`], return its parent, if any.
+    #[inline]
+    pub fn parent_expression(&self, node_id: NodeId) -> Option<&'a Expr> {
+        let parent_node_id = self.nodes.ancestor_ids(node_id).nth(1)?;
+        self.nodes[parent_node_id].as_expression()
+    }
+
+    /// Given a [`NodeId`], return the [`NodeId`] of the parent expression, if any.
+    pub fn parent_expression_id(&self, node_id: NodeId) -> Option<NodeId> {
+        let parent_node_id = self.nodes.ancestor_ids(node_id).nth(1)?;
+        self.nodes[parent_node_id]
+            .is_expression()
+            .then_some(parent_node_id)
     }
 
     /// Return the [`Stmt`] corresponding to the given [`NodeId`].
@@ -986,6 +1407,14 @@ impl<'a> SemanticModel<'a> {
             .ancestor_ids(node_id)
             .find_map(|id| self.nodes[id].as_statement())
             .expect("No statement found")
+    }
+
+    /// Returns an [`Iterator`] over the statements, starting from the given [`NodeId`].
+    /// through to any parents.
+    pub fn statements(&self, node_id: NodeId) -> impl Iterator<Item = &'a Stmt> + '_ {
+        self.nodes
+            .ancestor_ids(node_id)
+            .filter_map(move |id| self.nodes[id].as_statement())
     }
 
     /// Given a [`Stmt`], return its parent, if any.
@@ -1005,6 +1434,73 @@ impl<'a> SemanticModel<'a> {
             .nth(1)
     }
 
+    /// Return the [`Expr`] corresponding to the given [`NodeId`].
+    #[inline]
+    pub fn expression(&self, node_id: NodeId) -> Option<&'a Expr> {
+        self.nodes[node_id].as_expression()
+    }
+
+    /// Returns an [`Iterator`] over the expressions, starting from the given [`NodeId`].
+    /// through to any parents.
+    pub fn expressions(&self, node_id: NodeId) -> impl Iterator<Item = &'a Expr> + '_ {
+        self.nodes
+            .ancestor_ids(node_id)
+            .map_while(move |id| self.nodes[id].as_expression())
+    }
+
+    /// Mark a Python module as "seen" by the semantic model. Future callers can quickly discount
+    /// the need to resolve symbols from these modules if they haven't been seen.
+    pub fn add_module(&mut self, module: &str) {
+        match module {
+            "_typeshed" => self.seen.insert(Modules::TYPESHED),
+            "anyio" => self.seen.insert(Modules::ANYIO),
+            "builtins" => self.seen.insert(Modules::BUILTINS),
+            "collections" => self.seen.insert(Modules::COLLECTIONS),
+            "copy" => self.seen.insert(Modules::COPY),
+            "contextvars" => self.seen.insert(Modules::CONTEXTVARS),
+            "dataclasses" => self.seen.insert(Modules::DATACLASSES),
+            "datetime" => self.seen.insert(Modules::DATETIME),
+            "django" => self.seen.insert(Modules::DJANGO),
+            "fastapi" => self.seen.insert(Modules::FASTAPI),
+            "flask" => self.seen.insert(Modules::FLASK),
+            "logging" => self.seen.insert(Modules::LOGGING),
+            "markupsafe" => self.seen.insert(Modules::MARKUPSAFE),
+            "mock" => self.seen.insert(Modules::MOCK),
+            "numpy" => self.seen.insert(Modules::NUMPY),
+            "os" => self.seen.insert(Modules::OS),
+            "pandas" => self.seen.insert(Modules::PANDAS),
+            "pytest" => self.seen.insert(Modules::PYTEST),
+            "re" => self.seen.insert(Modules::RE),
+            "regex" => self.seen.insert(Modules::REGEX),
+            "six" => self.seen.insert(Modules::SIX),
+            "subprocess" => self.seen.insert(Modules::SUBPROCESS),
+            "tarfile" => self.seen.insert(Modules::TARFILE),
+            "trio" => self.seen.insert(Modules::TRIO),
+            "typing" => self.seen.insert(Modules::TYPING),
+            "typing_extensions" => self.seen.insert(Modules::TYPING_EXTENSIONS),
+            "attr" | "attrs" => self.seen.insert(Modules::ATTRS),
+            "airflow" => self.seen.insert(Modules::AIRFLOW),
+            "hashlib" => self.seen.insert(Modules::HASHLIB),
+            "crypt" => self.seen.insert(Modules::CRYPT),
+            _ => {}
+        }
+    }
+
+    /// Return `true` if the [`Module`] was "seen" anywhere in the semantic model. This is used as
+    /// a fast path to avoid unnecessary work when resolving symbols.
+    ///
+    /// Callers should still verify that the module is available in the current scope, as visiting
+    /// an import of the relevant module _anywhere_ in the file will cause this method to return
+    /// `true`.
+    pub fn seen_module(&self, module: Modules) -> bool {
+        self.seen.intersects(module)
+    }
+
+    pub fn seen_typing(&self) -> bool {
+        self.seen_module(Modules::TYPING | Modules::TYPESHED | Modules::TYPING_EXTENSIONS)
+            || !self.typing_modules.is_empty()
+    }
+
     /// Set the [`Globals`] for the current [`Scope`].
     pub fn set_globals(&mut self, globals: Globals<'a>) {
         // If any global bindings don't already exist in the global scope, add them.
@@ -1018,7 +1514,7 @@ impl<'a> SemanticModel<'a> {
                     kind: BindingKind::Assignment,
                     range: *range,
                     references: Vec::new(),
-                    scope: self.scope_id,
+                    scope: ScopeId::global(),
                     source: self.node_id,
                     context: self.execution_context(),
                     exceptions: self.exceptions(),
@@ -1034,7 +1530,7 @@ impl<'a> SemanticModel<'a> {
     /// Return the [`TextRange`] at which a name is declared as global in the current [`Scope`].
     pub fn global(&self, name: &str) -> Option<TextRange> {
         let global_id = self.scopes[self.scope_id].globals_id()?;
-        self.globals[global_id].get(name).copied()
+        self.globals[global_id].get(name)
     }
 
     /// Given a `name` that has been declared `nonlocal`, return the [`ScopeId`] and [`BindingId`]
@@ -1081,36 +1577,55 @@ impl<'a> SemanticModel<'a> {
     /// Return `true` if the model is in a nested union expression (e.g., the inner `Union` in
     /// `Union[Union[int, str], float]`).
     pub fn in_nested_union(&self) -> bool {
-        // Ex) `Union[Union[int, str], float]`
-        if self
-            .current_expression_grandparent()
-            .and_then(Expr::as_subscript_expr)
-            .is_some_and(|parent| self.match_typing_expr(&parent.value, "Union"))
-        {
-            return true;
-        }
+        let mut parent_expressions = self.current_expressions().skip(1);
 
-        // Ex) `int | Union[str, float]`
-        if self.current_expression_parent().is_some_and(|parent| {
-            matches!(
-                parent,
-                Expr::BinOp(ast::ExprBinOp {
-                    op: Operator::BitOr,
-                    ..
-                })
-            )
-        }) {
-            return true;
+        match parent_expressions.next() {
+            // The parent expression is of the inner union is a single `typing.Union`.
+            // Ex) `Union[Union[a, b]]`
+            Some(Expr::Subscript(parent)) => self.match_typing_expr(&parent.value, "Union"),
+            // The parent expression is of the inner union is a tuple with two or more
+            // comma-separated elements and the parent of that tuple is a `typing.Union`.
+            // Ex) `Union[Union[a, b], Union[c, d]]`
+            Some(Expr::Tuple(_)) => parent_expressions
+                .next()
+                .and_then(Expr::as_subscript_expr)
+                .is_some_and(|grandparent| self.match_typing_expr(&grandparent.value, "Union")),
+            // The parent expression of the inner union is a PEP604-style union.
+            // Ex) `a | b | c` or `Union[a, b] | c`
+            // In contrast to `typing.Union`, PEP604-style unions are always binary operations, e.g.
+            // the expression `a | b | c` is represented by two binary unions: `(a | b) | c`.
+            Some(Expr::BinOp(bin_op)) => bin_op.op.is_bit_or(),
+            // Not a nested union otherwise.
+            _ => false,
         }
-
-        false
     }
 
-    /// Returns `true` if `left` and `right` are on different branches of an `if`, `match`, or
+    /// Return `true` if the model is in a nested literal expression (e.g., the inner `Literal` in
+    /// `Literal[Literal[int, str], float]`).
+    pub fn in_nested_literal(&self) -> bool {
+        let mut parent_expressions = self.current_expressions().skip(1);
+
+        match parent_expressions.next() {
+            // The parent expression of the current `Literal` is a tuple, and the
+            // grandparent is a `Literal`.
+            // Ex) `Literal[Literal[str], Literal[int]]`
+            Some(Expr::Tuple(_)) => parent_expressions
+                .next()
+                .and_then(Expr::as_subscript_expr)
+                .is_some_and(|grandparent| self.match_typing_expr(&grandparent.value, "Literal")),
+            // The parent expression of the current `Literal` is also a `Literal`.
+            // Ex) `Literal[Literal[str]]`
+            Some(Expr::Subscript(parent)) => self.match_typing_expr(&parent.value, "Literal"),
+            // Not a nested literal otherwise
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if `left` and `right` are in the same branches of an `if`, `match`, or
     /// `try` statement.
     ///
     /// This implementation assumes that the statements are in the same scope.
-    pub fn different_branches(&self, left: NodeId, right: NodeId) -> bool {
+    pub fn same_branch(&self, left: NodeId, right: NodeId) -> bool {
         // Collect the branch path for the left statement.
         let left = self
             .nodes
@@ -1127,10 +1642,7 @@ impl<'a> SemanticModel<'a> {
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
             .collect::<Vec<_>>();
 
-        !left
-            .iter()
-            .zip(right.iter())
-            .all(|(left, right)| left == right)
+        left == right
     }
 
     /// Returns `true` if the given expression is an unused variable, or consists solely of
@@ -1138,9 +1650,7 @@ impl<'a> SemanticModel<'a> {
     /// variable to be "used" if it's shadowed by another variable with usages.
     pub fn is_unused(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
-                elts.iter().all(|expr| self.is_unused(expr))
-            }
+            Expr::Tuple(tuple) => tuple.iter().all(|expr| self.is_unused(expr)),
             Expr::Name(ast::ExprName { id, .. }) => {
                 // Treat a variable as used if it has any usages, _or_ it's shadowed by another variable
                 // with usages.
@@ -1161,25 +1671,35 @@ impl<'a> SemanticModel<'a> {
                     .get_all(id)
                     .map(|binding_id| self.binding(binding_id))
                     .filter(|binding| binding.start() >= expr.start())
-                    .all(|binding| !binding.is_used())
+                    .all(Binding::is_unused)
             }
             _ => false,
         }
     }
 
     /// Add a reference to the given [`BindingId`] in the local scope.
-    pub fn add_local_reference(&mut self, binding_id: BindingId, range: TextRange) {
-        let reference_id = self
-            .resolved_references
-            .push(self.scope_id, range, self.flags);
+    pub fn add_local_reference(
+        &mut self,
+        binding_id: BindingId,
+        ctx: ExprContext,
+        range: TextRange,
+    ) {
+        let reference_id =
+            self.resolved_references
+                .push(self.scope_id, self.node_id, ctx, self.flags, range);
         self.bindings[binding_id].references.push(reference_id);
     }
 
     /// Add a reference to the given [`BindingId`] in the global scope.
-    pub fn add_global_reference(&mut self, binding_id: BindingId, range: TextRange) {
-        let reference_id = self
-            .resolved_references
-            .push(ScopeId::global(), range, self.flags);
+    pub fn add_global_reference(
+        &mut self,
+        binding_id: BindingId,
+        ctx: ExprContext,
+        range: TextRange,
+    ) {
+        let reference_id =
+            self.resolved_references
+                .push(ScopeId::global(), self.node_id, ctx, self.flags, range);
         self.bindings[binding_id].references.push(reference_id);
     }
 
@@ -1223,16 +1743,6 @@ impl<'a> SemanticModel<'a> {
             exceptions.insert(*exception);
         }
         exceptions
-    }
-
-    /// Return `true` if the module at the given path was seen anywhere in the semantic model.
-    /// This includes both direct imports (`import trio`) and member imports (`from trio import
-    /// TrioTask`).
-    pub fn seen(&self, module: &[&str]) -> bool {
-        self.bindings
-            .iter()
-            .filter_map(Binding::as_any_import)
-            .any(|import| import.call_path().starts_with(module))
     }
 
     /// Generate a [`Snapshot`] of the current semantic model.
@@ -1282,10 +1792,16 @@ impl<'a> SemanticModel<'a> {
             .intersects(SemanticModelFlags::TYPING_ONLY_ANNOTATION)
     }
 
-    /// Return `true` if the model is in a runtime-required type annotation.
-    pub const fn in_runtime_annotation(&self) -> bool {
+    /// Return `true` if the context is in a runtime-evaluated type annotation.
+    pub const fn in_runtime_evaluated_annotation(&self) -> bool {
         self.flags
-            .intersects(SemanticModelFlags::RUNTIME_ANNOTATION)
+            .intersects(SemanticModelFlags::RUNTIME_EVALUATED_ANNOTATION)
+    }
+
+    /// Return `true` if the context is in a runtime-required type annotation.
+    pub const fn in_runtime_required_annotation(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::RUNTIME_REQUIRED_ANNOTATION)
     }
 
     /// Return `true` if the model is in a type definition.
@@ -1293,31 +1809,36 @@ impl<'a> SemanticModel<'a> {
         self.flags.intersects(SemanticModelFlags::TYPE_DEFINITION)
     }
 
-    /// Return `true` if the model is in a string type definition.
+    /// Return `true` if the model is visiting a "string type definition"
+    /// that was previously deferred when initially traversing the AST
     pub const fn in_string_type_definition(&self) -> bool {
         self.flags
             .intersects(SemanticModelFlags::STRING_TYPE_DEFINITION)
     }
 
-    /// Return `true` if the model is in a "simple" string type definition.
+    /// Return `true` if the model is visiting a "simple string type definition"
+    /// that was previously deferred when initially traversing the AST
     pub const fn in_simple_string_type_definition(&self) -> bool {
         self.flags
             .intersects(SemanticModelFlags::SIMPLE_STRING_TYPE_DEFINITION)
     }
 
-    /// Return `true` if the model is in a "complex" string type definition.
+    /// Return `true` if the model is visiting a "complex string type definition"
+    /// that was previously deferred when initially traversing the AST
     pub const fn in_complex_string_type_definition(&self) -> bool {
         self.flags
             .intersects(SemanticModelFlags::COMPLEX_STRING_TYPE_DEFINITION)
     }
 
-    /// Return `true` if the model is in a `__future__` type definition.
+    /// Return `true` if the model is visiting a "`__future__` type definition"
+    /// that was previously deferred when initially traversing the AST
     pub const fn in_future_type_definition(&self) -> bool {
         self.flags
             .intersects(SemanticModelFlags::FUTURE_TYPE_DEFINITION)
     }
 
-    /// Return `true` if the model is in any kind of deferred type definition.
+    /// Return `true` if the model is visiting any kind of type definition
+    /// that was previously deferred when initially traversing the AST
     pub const fn in_deferred_type_definition(&self) -> bool {
         self.flags
             .intersects(SemanticModelFlags::DEFERRED_TYPE_DEFINITION)
@@ -1343,14 +1864,61 @@ impl<'a> SemanticModel<'a> {
             || (self.in_future_type_definition() && self.in_typing_only_annotation())
     }
 
+    /// Return `true` if the model is visiting the value expression
+    /// of a [PEP 613] type alias.
+    ///
+    /// For example:
+    /// ```python
+    /// from typing import TypeAlias
+    ///
+    /// OptStr: TypeAlias = str | None  # We're visiting the RHS
+    /// ```
+    ///
+    /// [PEP 613]: https://peps.python.org/pep-0613/
+    pub const fn in_annotated_type_alias_value(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::ANNOTATED_TYPE_ALIAS)
+    }
+
+    /// Return `true` if the model is visiting the value expression
+    /// of a [PEP 695] type alias.
+    ///
+    /// For example:
+    /// ```python
+    /// type OptStr = str | None  # We're visiting the RHS
+    /// ```
+    ///
+    /// [PEP 695]: https://peps.python.org/pep-0695/#generic-type-alias
+    pub const fn in_deferred_type_alias_value(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::DEFERRED_TYPE_ALIAS)
+    }
+
+    /// Return `true` if the model is visiting the value expression of
+    /// either kind of type alias.
+    pub const fn in_type_alias_value(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::TYPE_ALIAS)
+    }
+
     /// Return `true` if the model is in an exception handler.
     pub const fn in_exception_handler(&self) -> bool {
         self.flags.intersects(SemanticModelFlags::EXCEPTION_HANDLER)
     }
 
+    /// Return `true` if the model is in an `assert` statement.
+    pub const fn in_assert_statement(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::ASSERT_STATEMENT)
+    }
+
     /// Return `true` if the model is in an f-string.
     pub const fn in_f_string(&self) -> bool {
         self.flags.intersects(SemanticModelFlags::F_STRING)
+    }
+
+    /// Return `true` if the model is in an f-string replacement field.
+    pub const fn in_f_string_replacement_field(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::F_STRING_REPLACEMENT_FIELD)
     }
 
     /// Return `true` if the model is in boolean test.
@@ -1359,8 +1927,8 @@ impl<'a> SemanticModel<'a> {
     }
 
     /// Return `true` if the model is in a `typing::Literal` annotation.
-    pub const fn in_literal(&self) -> bool {
-        self.flags.intersects(SemanticModelFlags::LITERAL)
+    pub const fn in_typing_literal(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::TYPING_LITERAL)
     }
 
     /// Return `true` if the model is in a subscript expression.
@@ -1374,6 +1942,24 @@ impl<'a> SemanticModel<'a> {
             .intersects(SemanticModelFlags::TYPE_CHECKING_BLOCK)
     }
 
+    /// Return `true` if the model is in a docstring as described in [PEP 257].
+    ///
+    /// [PEP 257]: https://peps.python.org/pep-0257/#what-is-a-docstring
+    pub const fn in_pep_257_docstring(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::PEP_257_DOCSTRING)
+    }
+
+    /// Return `true` if the model is in an attribute docstring.
+    pub const fn in_attribute_docstring(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::ATTRIBUTE_DOCSTRING)
+    }
+
+    /// Return `true` if the model is in a `@no_type_check` context.
+    pub const fn in_no_type_check(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::NO_TYPE_CHECK)
+    }
+
     /// Return `true` if the model has traversed past the "top-of-file" import boundary.
     pub const fn seen_import_boundary(&self) -> bool {
         self.flags.intersects(SemanticModelFlags::IMPORT_BOUNDARY)
@@ -1384,10 +1970,60 @@ impl<'a> SemanticModel<'a> {
         self.flags.intersects(SemanticModelFlags::FUTURES_BOUNDARY)
     }
 
-    /// Return `true` if `__future__`-style type annotations are enabled.
-    pub const fn future_annotations(&self) -> bool {
+    /// Return `true` if the model has traversed past the module docstring boundary.
+    pub const fn seen_module_docstring_boundary(&self) -> bool {
         self.flags
-            .intersects(SemanticModelFlags::FUTURE_ANNOTATIONS)
+            .intersects(SemanticModelFlags::MODULE_DOCSTRING_BOUNDARY)
+    }
+
+    /// Return `true` if `__future__`-style type annotations are enabled.
+    pub const fn future_annotations_or_stub(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::FUTURE_ANNOTATIONS_OR_STUB)
+    }
+
+    /// Return `true` if the model is in a stub file (i.e., a file with a `.pyi` extension).
+    pub const fn in_stub_file(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::STUB_FILE)
+    }
+
+    /// Return `true` if the model is in a named expression assignment (e.g., `x := 1`).
+    pub const fn in_named_expression_assignment(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::NAMED_EXPRESSION_ASSIGNMENT)
+    }
+
+    /// Return `true` if the model is visiting the r.h.s. of an `__all__` definition
+    /// (e.g. `"foo"` in `__all__ = ["foo"]`)
+    pub const fn in_dunder_all_definition(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::DUNDER_ALL_DEFINITION)
+    }
+
+    /// Return `true` if the model is visiting an item in a class's bases tuple
+    /// (e.g. `Foo` in `class Bar(Foo): ...`)
+    pub const fn in_class_base(&self) -> bool {
+        self.flags.intersects(SemanticModelFlags::CLASS_BASE)
+    }
+
+    /// Return `true` if the model is visiting an item in a class's bases tuple
+    /// that was initially deferred while traversing the AST.
+    /// (This only happens in stub files.)
+    pub const fn in_deferred_class_base(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::DEFERRED_CLASS_BASE)
+    }
+
+    /// Return `true` if we should use the new semantics to recognize
+    /// type checking blocks. Previously we only recognized type checking
+    /// blocks if `TYPE_CHECKING` was imported from a typing module.
+    ///
+    /// With this feature flag enabled we recognize any symbol named
+    /// `TYPE_CHECKING`, regardless of where it comes from to mirror
+    /// what mypy and pyright do.
+    pub const fn use_new_type_checking_block_detection_semantics(&self) -> bool {
+        self.flags
+            .intersects(SemanticModelFlags::NEW_TYPE_CHECKING_BLOCK_DETECTION)
     }
 
     /// Return an iterator over all bindings shadowed by the given [`BindingId`], within the
@@ -1454,11 +2090,75 @@ impl ShadowedBinding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypingOnlyBindingsStatus {
+    Allowed,
+    Disallowed,
+}
+
+impl TypingOnlyBindingsStatus {
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, TypingOnlyBindingsStatus::Allowed)
+    }
+
+    pub const fn is_disallowed(self) -> bool {
+        matches!(self, TypingOnlyBindingsStatus::Disallowed)
+    }
+}
+
+impl From<bool> for TypingOnlyBindingsStatus {
+    fn from(value: bool) -> Self {
+        if value {
+            TypingOnlyBindingsStatus::Allowed
+        } else {
+            TypingOnlyBindingsStatus::Disallowed
+        }
+    }
+}
+
+bitflags! {
+    /// A select list of Python modules that the semantic model can explicitly track.
+    #[derive(Debug)]
+    pub struct Modules: u32 {
+        const COLLECTIONS = 1 << 0;
+        const DATETIME = 1 << 1;
+        const DJANGO = 1 << 2;
+        const LOGGING = 1 << 3;
+        const MOCK = 1 << 4;
+        const NUMPY = 1 << 5;
+        const OS = 1 << 6;
+        const PANDAS = 1 << 7;
+        const PYTEST = 1 << 8;
+        const RE = 1 << 9;
+        const SIX = 1 << 10;
+        const SUBPROCESS = 1 << 11;
+        const TARFILE = 1 << 12;
+        const TRIO = 1 << 13;
+        const TYPING = 1 << 14;
+        const TYPING_EXTENSIONS = 1 << 15;
+        const TYPESHED = 1 << 16;
+        const DATACLASSES = 1 << 17;
+        const BUILTINS = 1 << 18;
+        const CONTEXTVARS = 1 << 19;
+        const ANYIO = 1 << 20;
+        const FASTAPI = 1 << 21;
+        const COPY = 1 << 22;
+        const MARKUPSAFE = 1 << 23;
+        const FLASK = 1 << 24;
+        const ATTRS = 1 << 25;
+        const REGEX = 1 << 26;
+        const AIRFLOW = 1 << 27;
+        const HASHLIB = 1 << 28;
+        const CRYPT = 1 << 29;
+    }
+}
+
 bitflags! {
     /// Flags indicating the current model state.
     #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
-    pub struct SemanticModelFlags: u16 {
-        /// The model is in a typing-time-only type annotation.
+    pub struct SemanticModelFlags: u32 {
+        /// The model is in a type annotation that will only be evaluated when running a type
+        /// checker.
         ///
         /// For example, the model could be visiting `int` in:
         /// ```python
@@ -1473,7 +2173,7 @@ bitflags! {
         /// are any annotated assignments in module or class scopes.
         const TYPING_ONLY_ANNOTATION = 1 << 0;
 
-        /// The model is in a runtime type annotation.
+        /// The model is in a type annotation that will be evaluated at runtime.
         ///
         /// For example, the model could be visiting `int` in:
         /// ```python
@@ -1487,7 +2187,26 @@ bitflags! {
         /// If `from __future__ import annotations` is used, all annotations are evaluated at
         /// typing time. Otherwise, all function argument annotations are evaluated at runtime, as
         /// are any annotated assignments in module or class scopes.
-        const RUNTIME_ANNOTATION = 1 << 1;
+        const RUNTIME_EVALUATED_ANNOTATION = 1 << 1;
+
+        /// The model is in a type annotation that is _required_ to be available at runtime.
+        ///
+        /// For example, the context could be visiting `int` in:
+        /// ```python
+        /// from pydantic import BaseModel
+        ///
+        /// class Foo(BaseModel):
+        ///    x: int
+        /// ```
+        ///
+        /// In this case, Pydantic requires that the type annotation be available at runtime
+        /// in order to perform runtime type-checking.
+        ///
+        /// Unlike [`RUNTIME_EVALUATED_ANNOTATION`], annotations that are marked as
+        /// [`RUNTIME_REQUIRED_ANNOTATION`] cannot be deferred to typing time via conversion to a
+        /// forward reference (e.g., by wrapping the type in quotes), as the annotations are not
+        /// only required by the Python interpreter, but by runtime type checkers too.
+        const RUNTIME_REQUIRED_ANNOTATION = 1 << 2;
 
         /// The model is in a type definition.
         ///
@@ -1501,7 +2220,7 @@ bitflags! {
         /// All type annotations are also type definitions, but the converse is not true.
         /// In our example, `int` is a type definition but not a type annotation, as it
         /// doesn't appear in a type annotation context, but rather in a type definition.
-        const TYPE_DEFINITION = 1 << 2;
+        const TYPE_DEFINITION = 1 << 3;
 
         /// The model is in a (deferred) "simple" string type definition.
         ///
@@ -1512,7 +2231,10 @@ bitflags! {
         ///
         /// "Simple" string type definitions are those that consist of a single string literal,
         /// as opposed to an implicitly concatenated string literal.
-        const SIMPLE_STRING_TYPE_DEFINITION =  1 << 3;
+        ///
+        /// Note that this flag is only set when we are actually *visiting* the deferred definition,
+        /// not when we "pass by" it when initially traversing the source tree.
+        const SIMPLE_STRING_TYPE_DEFINITION =  1 << 4;
 
         /// The model is in a (deferred) "complex" string type definition.
         ///
@@ -1523,7 +2245,10 @@ bitflags! {
         ///
         /// "Complex" string type definitions are those that consist of a implicitly concatenated
         /// string literals. These are uncommon but valid.
-        const COMPLEX_STRING_TYPE_DEFINITION = 1 << 4;
+        ///
+        /// Note that this flag is only set when we are actually *visiting* the deferred definition,
+        /// not when we "pass by" it when initially traversing the source tree.
+        const COMPLEX_STRING_TYPE_DEFINITION = 1 << 5;
 
         /// The model is in a (deferred) `__future__` type definition.
         ///
@@ -1536,7 +2261,21 @@ bitflags! {
         ///
         /// `__future__`-style type annotations are only enabled if the `annotations` feature
         /// is enabled via `from __future__ import annotations`.
-        const FUTURE_TYPE_DEFINITION = 1 << 5;
+        ///
+        /// This flag should only be set in contexts where PEP-563 semantics are relevant to
+        /// resolution of the type definition. For example, the flag should not be set
+        /// in the following context, because the type definition is not inside a type annotation,
+        /// so whether or not `from __future__ import annotations` is active has no relevance:
+        /// ```python
+        /// from __future__ import annotations
+        /// from typing import TypeAlias
+        ///
+        /// X: TypeAlias = list[int]
+        /// ```
+        ///
+        /// Note also that this flag is only set when we are actually *visiting* the deferred definition,
+        /// not when we "pass by" it when initially traversing the source tree.
+        const FUTURE_TYPE_DEFINITION = 1 << 6;
 
         /// The model is in an exception handler.
         ///
@@ -1547,7 +2286,7 @@ bitflags! {
         /// except Exception:
         ///     x: int = 1
         /// ```
-        const EXCEPTION_HANDLER = 1 << 6;
+        const EXCEPTION_HANDLER = 1 << 7;
 
         /// The model is in an f-string.
         ///
@@ -1555,7 +2294,7 @@ bitflags! {
         /// ```python
         /// f'{x}'
         /// ```
-        const F_STRING = 1 << 7;
+        const F_STRING = 1 << 8;
 
         /// The model is in a boolean test.
         ///
@@ -1567,7 +2306,7 @@ bitflags! {
         ///
         /// The implication is that the actual value returned by the current expression is
         /// not used, only its truthiness.
-        const BOOLEAN_TEST = 1 << 8;
+        const BOOLEAN_TEST = 1 << 9;
 
         /// The model is in a `typing::Literal` annotation.
         ///
@@ -1576,7 +2315,7 @@ bitflags! {
         /// def f(x: Literal["A", "B", "C"]):
         ///     ...
         /// ```
-        const LITERAL = 1 << 9;
+        const TYPING_LITERAL = 1 << 10;
 
         /// The model is in a subscript expression.
         ///
@@ -1584,7 +2323,7 @@ bitflags! {
         /// ```python
         /// x["a"]["b"]
         /// ```
-        const SUBSCRIPT = 1 << 10;
+        const SUBSCRIPT = 1 << 11;
 
         /// The model is in a type-checking block.
         ///
@@ -1596,7 +2335,7 @@ bitflags! {
         /// if TYPE_CHECKING:
         ///    x: int = 1
         /// ```
-        const TYPE_CHECKING_BLOCK = 1 << 11;
+        const TYPE_CHECKING_BLOCK = 1 << 12;
 
         /// The model has traversed past the "top-of-file" import boundary.
         ///
@@ -1609,7 +2348,7 @@ bitflags! {
         ///
         /// x: int = 1
         /// ```
-        const IMPORT_BOUNDARY = 1 << 12;
+        const IMPORT_BOUNDARY = 1 << 13;
 
         /// The model has traversed past the `__future__` import boundary.
         ///
@@ -1624,9 +2363,10 @@ bitflags! {
         ///
         /// Python considers it a syntax error to import from `__future__` after
         /// any other non-`__future__`-importing statements.
-        const FUTURES_BOUNDARY = 1 << 13;
+        const FUTURES_BOUNDARY = 1 << 14;
 
-        /// `__future__`-style type annotations are enabled in this model.
+        /// The model is in a file that has `from __future__ import annotations`
+        /// at the top of the module.
         ///
         /// For example, the model could be visiting `x` in:
         /// ```python
@@ -1636,20 +2376,197 @@ bitflags! {
         /// def f(x: int) -> int:
         ///   ...
         /// ```
-        const FUTURE_ANNOTATIONS = 1 << 14;
+        const FUTURE_ANNOTATIONS = 1 << 15;
 
-        /// The model is in a type parameter definition.
+        /// The model is in a Python stub file (i.e., a `.pyi` file).
+        const STUB_FILE = 1 << 16;
+
+        /// `__future__`-style type annotations are enabled in this model.
+        /// That could be because it's a stub file,
+        /// or it could be because it's a non-stub file that has `from __future__ import annotations`
+        /// at the top of the module.
+        const FUTURE_ANNOTATIONS_OR_STUB = Self::FUTURE_ANNOTATIONS.bits() | Self::STUB_FILE.bits();
+
+        /// The model has traversed past the module docstring.
         ///
-        /// For example, the model could be visiting `Record` in:
+        /// For example, the model could be visiting `x` in:
         /// ```python
-        /// from typing import TypeVar
+        /// """Module docstring."""
         ///
-        /// Record = TypeVar("Record")
+        /// x: int = 1
+        /// ```
+        const MODULE_DOCSTRING_BOUNDARY = 1 << 17;
+
+        /// The model is in a (deferred) [type parameter definition].
         ///
-        const TYPE_PARAM_DEFINITION = 1 << 15;
+        /// For example, the model could be visiting `T`, `P` or `Ts` in:
+        /// ```python
+        /// class Foo[T, *Ts, **P]: pass
+        /// ```
+        ///
+        /// Note that this flag is *not* set for "pre-PEP-695" TypeVars, ParamSpecs or TypeVarTuples.
+        /// None of the following would lead to the flag being set:
+        ///
+        /// ```python
+        /// from typing import TypeVar, ParamSpec, TypeVarTuple
+        ///
+        /// T = TypeVar("T")
+        /// P = ParamSpec("P")
+        /// Ts = TypeVarTuple("Ts")
+        /// ```
+        ///
+        /// Note also that this flag is only set when we are actually *visiting* the deferred definition,
+        /// not when we "pass by" it when initially traversing the source tree.
+        ///
+        /// [type parameter definition]: https://docs.python.org/3/reference/executionmodel.html#annotation-scopes
+        const TYPE_PARAM_DEFINITION = 1 << 18;
+
+        /// The model is in a named expression assignment.
+        ///
+        /// For example, the model could be visiting `x` in:
+        /// ```python
+        /// if (x := 1): ...
+        /// ```
+        const NAMED_EXPRESSION_ASSIGNMENT = 1 << 19;
+
+        /// The model is in a docstring as described in [PEP 257].
+        ///
+        /// For example, the model could be visiting either the module, class,
+        /// or function docstring in:
+        /// ```python
+        /// """Module docstring."""
+        ///
+        ///
+        /// class Foo:
+        ///     """Class docstring."""
+        ///     pass
+        ///
+        ///
+        /// def foo():
+        ///     """Function docstring."""
+        ///     pass
+        /// ```
+        ///
+        /// [PEP 257]: https://peps.python.org/pep-0257/#what-is-a-docstring
+        const PEP_257_DOCSTRING = 1 << 20;
+
+        /// The model is visiting the r.h.s. of a module-level `__all__` definition.
+        ///
+        /// This could be any module-level statement that assigns or alters `__all__`,
+        /// for example:
+        /// ```python
+        /// __all__ = ["foo"]
+        /// __all__: str = ["foo"]
+        /// __all__ = ("bar",)
+        /// __all__ += ("baz,")
+        /// ```
+        const DUNDER_ALL_DEFINITION = 1 << 21;
+
+        /// The model is in an f-string replacement field.
+        ///
+        /// For example, the model could be visiting `x` or `y` in:
+        ///
+        /// ```python
+        /// f"first {x} second {y}"
+        /// ```
+        const F_STRING_REPLACEMENT_FIELD = 1 << 22;
+
+        /// The model is visiting the bases tuple of a class.
+        ///
+        /// For example, the model could be visiting `Foo` or `Bar` in:
+        ///
+        /// ```python
+        /// class Baz(Foo, Bar):
+        ///     pass
+        /// ```
+        const CLASS_BASE = 1 << 23;
+
+        /// The model is visiting a class base that was initially deferred
+        /// while traversing the AST. (This only happens in stub files.)
+        const DEFERRED_CLASS_BASE = 1 << 24;
+
+        /// The model is in an attribute docstring.
+        ///
+        /// An attribute docstring is a string literal immediately following an assignment or an
+        /// annotated assignment statement. The context in which this is valid are:
+        /// 1. At the top level of a module
+        /// 2. At the top level of a class definition i.e., a class attribute
+        ///
+        /// For example:
+        /// ```python
+        /// a = 1
+        /// """This is an attribute docstring for `a` variable"""
+        ///
+        ///
+        /// class Foo:
+        ///     b = 1
+        ///     """This is an attribute docstring for `Foo.b` class variable"""
+        /// ```
+        ///
+        /// Unlike other kinds of docstrings as described in [PEP 257], attribute docstrings are
+        /// discarded at runtime. However, they are used by some documentation renderers and
+        /// static-analysis tools.
+        ///
+        /// [PEP 257]: https://peps.python.org/pep-0257/#what-is-a-docstring
+        const ATTRIBUTE_DOCSTRING = 1 << 25;
+
+        /// The model is in the value expression of a [PEP 613] explicit type alias.
+        ///
+        /// For example:
+        /// ```python
+        /// from typing import TypeAlias
+        ///
+        /// OptStr: TypeAlias = str | None  # We're visiting the RHS
+        /// ```
+        ///
+        /// [PEP 613]: https://peps.python.org/pep-0613/
+        const ANNOTATED_TYPE_ALIAS = 1 << 27;
+
+        /// The model is in the value expression of a [PEP 695] type statement.
+        ///
+        /// For example:
+        /// ```python
+        /// type OptStr = str | None  # We're visiting the RHS
+        /// ```
+        ///
+        /// [PEP 695]: https://peps.python.org/pep-0695/#generic-type-alias
+        const DEFERRED_TYPE_ALIAS = 1 << 28;
+
+        /// The model is visiting an `assert` statement.
+        ///
+        /// For example, the model might be visiting `y` in
+        /// ```python
+        /// assert (y := x**2) > 42, y
+        /// ```
+        const ASSERT_STATEMENT = 1 << 29;
+
+        /// The model is in a [`@no_type_check`] context.
+        ///
+        /// This is used to skip type checking when the `@no_type_check` decorator is found.
+        ///
+        /// For example (adapted from [#13824]):
+        /// ```python
+        /// from typing import no_type_check
+        ///
+        /// @no_type_check
+        /// def fn(arg: "A") -> "R":
+        ///     pass
+        /// ```
+        ///
+        /// [no_type_check]: https://docs.python.org/3/library/typing.html#typing.no_type_check
+        /// [#13824]: https://github.com/astral-sh/ruff/issues/13824
+        const NO_TYPE_CHECK = 1 << 30;
+
+        /// The model special-cases any symbol named `TYPE_CHECKING`.
+        ///
+        /// Previously we only recognized `TYPE_CHECKING` if it was part of
+        /// one of the configured `typing` modules. This flag exists to
+        /// test out the semantic change only in preview. This flag will go
+        /// away once this change has been stabilized.
+        const NEW_TYPE_CHECKING_BLOCK_DETECTION = 1 << 31;
 
         /// The context is in any type annotation.
-        const ANNOTATION = Self::TYPING_ONLY_ANNOTATION.bits() | Self::RUNTIME_ANNOTATION.bits();
+        const ANNOTATION = Self::TYPING_ONLY_ANNOTATION.bits() | Self::RUNTIME_EVALUATED_ANNOTATION.bits() | Self::RUNTIME_REQUIRED_ANNOTATION.bits();
 
         /// The context is in any string type definition.
         const STRING_TYPE_DEFINITION = Self::SIMPLE_STRING_TYPE_DEFINITION.bits()
@@ -1664,16 +2581,19 @@ bitflags! {
         /// The context is in a typing-only context.
         const TYPING_CONTEXT = Self::TYPE_CHECKING_BLOCK.bits() | Self::TYPING_ONLY_ANNOTATION.bits() |
             Self::STRING_TYPE_DEFINITION.bits() | Self::TYPE_PARAM_DEFINITION.bits();
+
+        /// The context is in any type alias.
+        const TYPE_ALIAS = Self::ANNOTATED_TYPE_ALIAS.bits() | Self::DEFERRED_TYPE_ALIAS.bits();
     }
 }
 
 impl SemanticModelFlags {
     pub fn new(path: &Path) -> Self {
-        let mut flags = Self::default();
-        if is_python_stub_file(path) {
-            flags |= Self::FUTURE_ANNOTATIONS;
+        if PySourceType::from(path).is_stub() {
+            Self::STUB_FILE
+        } else {
+            Self::default()
         }
-        flags
     }
 }
 
@@ -1753,6 +2673,8 @@ pub enum ReadResult {
 pub struct ImportedName {
     /// The name to which the imported symbol is bound.
     name: String,
+    /// The statement from which the symbol is imported.
+    source: NodeId,
     /// The range at which the symbol is imported.
     range: TextRange,
     /// The context in which the symbol is imported.
@@ -1766,6 +2688,10 @@ impl ImportedName {
 
     pub const fn context(&self) -> ExecutionContext {
         self.context
+    }
+
+    pub fn statement<'a>(&self, semantic: &SemanticModel<'a>) -> &'a Stmt {
+        semantic.statement(self.source)
     }
 }
 

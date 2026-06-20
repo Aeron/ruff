@@ -87,6 +87,16 @@ class Apples:
     def __special_custom_magic__(self):
         pass
 
+    @classmethod
+    def __prepare__():
+        pass
+
+    def __mro_entries__(self, bases):
+        pass
+
+    # Removed with Python 3
+    def __unicode__(self):
+        pass
 
 def __foo_bar__():  # this is not checked by the [bad-dunder-name] rule
     ...

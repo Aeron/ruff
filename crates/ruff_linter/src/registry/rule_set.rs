@@ -1,9 +1,11 @@
-use crate::registry::Rule;
-use ruff_macros::CacheKey;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::iter::FusedIterator;
 
-const RULESET_SIZE: usize = 12;
+use ruff_macros::CacheKey;
+
+use crate::registry::Rule;
+
+const RULESET_SIZE: usize = 15;
 
 /// A set of [`Rule`]s.
 ///
@@ -207,6 +209,15 @@ impl RuleSet {
         *self = set.union(&RuleSet::from_rule(rule));
     }
 
+    #[inline]
+    pub fn set(&mut self, rule: Rule, enabled: bool) {
+        if enabled {
+            self.insert(rule);
+        } else {
+            self.remove(rule);
+        }
+    }
+
     /// Removes `rule` from the set.
     ///
     /// ## Examples
@@ -234,6 +245,7 @@ impl RuleSet {
     /// assert!(set.contains(Rule::AmbiguousFunctionName));
     /// assert!(!set.contains(Rule::BreakOutsideLoop));
     /// ```
+    #[inline]
     pub const fn contains(&self, rule: Rule) -> bool {
         let rule = rule as u16;
         let index = rule as usize / Self::SLICE_BITS as usize;
@@ -241,6 +253,20 @@ impl RuleSet {
         let mask = 1 << shift;
 
         self.0[index] & mask != 0
+    }
+
+    /// Returns `true` if any of the rules in `rules` are in this set.
+    #[inline]
+    pub const fn any(&self, rules: &[Rule]) -> bool {
+        let mut any = false;
+        let mut i = 0;
+
+        while i < rules.len() {
+            any |= self.contains(rules[i]);
+            i += 1;
+        }
+
+        any
     }
 
     /// Returns an iterator over the rules in this set.
@@ -266,6 +292,23 @@ impl RuleSet {
 impl Debug for RuleSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl Display for RuleSet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            write!(f, "[]")?;
+        } else {
+            writeln!(f, "[")?;
+            for rule in self {
+                let name = rule.as_ref();
+                let code = rule.noqa_code();
+                writeln!(f, "\t{name} ({code}),")?;
+            }
+            write!(f, "]")?;
+        }
+        Ok(())
     }
 }
 
@@ -326,7 +369,7 @@ impl Iterator for RuleSetIterator {
                 let rule_value = self.index * RuleSet::SLICE_BITS + bit;
                 // SAFETY: RuleSet guarantees that only valid rules are stored in the set.
                 #[allow(unsafe_code)]
-                return Some(unsafe { std::mem::transmute(rule_value) });
+                return Some(unsafe { std::mem::transmute::<u16, Rule>(rule_value) });
             }
 
             self.index += 1;
@@ -346,8 +389,9 @@ impl FusedIterator for RuleSetIterator {}
 
 #[cfg(test)]
 mod tests {
-    use crate::registry::{Rule, RuleSet};
     use strum::IntoEnumIterator;
+
+    use crate::registry::{Rule, RuleSet};
 
     /// Tests that the set can contain all rules
     #[test]

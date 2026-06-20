@@ -1,7 +1,7 @@
 use ruff_python_ast::{self as ast, CmpOp, Expr};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -15,11 +15,12 @@ use crate::registry::Rule;
 ///
 /// ## Why is this bad?
 /// Some `sys.platform` checks are too complex for type checkers to
-/// understand, and thus result in false positives. `sys.platform` checks
-/// should be simple string comparisons, like `sys.platform == "linux"`.
+/// understand, and thus result in incorrect inferences by these tools.
+/// `sys.platform` checks should be simple string comparisons, like
+/// `if sys.platform == "linux"`.
 ///
 /// ## Example
-/// ```python
+/// ```pyi
 /// if sys.platform.startswith("linux"):
 ///     # Linux specific definitions
 ///     ...
@@ -29,7 +30,7 @@ use crate::registry::Rule;
 /// ```
 ///
 /// Instead, use a simple string comparison, such as `==` or `!=`:
-/// ```python
+/// ```pyi
 /// if sys.platform == "linux":
 ///     # Linux specific definitions
 ///     ...
@@ -39,14 +40,14 @@ use crate::registry::Rule;
 /// ```
 ///
 /// ## References
-/// - [PEP 484](https://peps.python.org/pep-0484/#version-and-platform-checking)
-#[violation]
-pub struct UnrecognizedPlatformCheck;
+/// - [Typing documentation: Version and Platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct UnrecognizedPlatformCheck;
 
 impl Violation for UnrecognizedPlatformCheck {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Unrecognized `sys.platform` check")
+        "Unrecognized `sys.platform` check".to_string()
     }
 }
 
@@ -63,21 +64,19 @@ impl Violation for UnrecognizedPlatformCheck {
 /// The list of known platforms is: "linux", "win32", "cygwin", "darwin".
 ///
 /// ## Example
-/// ```python
-/// if sys.platform == "linus":
-///     ...
+/// ```pyi
+/// if sys.platform == "linus": ...
 /// ```
 ///
 /// Use instead:
-/// ```python
-/// if sys.platform == "linux":
-///     ...
+/// ```pyi
+/// if sys.platform == "linux": ...
 /// ```
 ///
 /// ## References
-/// - [PEP 484](https://peps.python.org/pep-0484/#version-and-platform-checking)
-#[violation]
-pub struct UnrecognizedPlatformName {
+/// - [Typing documentation: Version and Platform checking](https://typing.readthedocs.io/en/latest/spec/directives.html#version-and-platform-checks)
+#[derive(ViolationMetadata)]
+pub(crate) struct UnrecognizedPlatformName {
     platform: String,
 }
 
@@ -90,7 +89,7 @@ impl Violation for UnrecognizedPlatformName {
 }
 
 /// PYI007, PYI008
-pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
+pub(crate) fn unrecognized_platform(checker: &Checker, test: &Expr) {
     let Expr::Compare(ast::ExprCompare {
         left,
         ops,
@@ -101,14 +100,14 @@ pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
         return;
     };
 
-    let ([op], [right]) = (ops.as_slice(), comparators.as_slice()) else {
+    let ([op], [right]) = (&**ops, &**comparators) else {
         return;
     };
 
     if !checker
         .semantic()
-        .resolve_call_path(left)
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["sys", "platform"]))
+        .resolve_qualified_name(left)
+        .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["sys", "platform"]))
     {
         return;
     }
@@ -116,9 +115,7 @@ pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
     // "in" might also make sense but we don't currently have one.
     if !matches!(op, CmpOp::Eq | CmpOp::NotEq) {
         if checker.enabled(Rule::UnrecognizedPlatformCheck) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
+            checker.report_diagnostic(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
         }
         return;
     }
@@ -127,10 +124,10 @@ pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
         // Other values are possible but we don't need them right now.
         // This protects against typos.
         if checker.enabled(Rule::UnrecognizedPlatformName) {
-            if !matches!(value.as_str(), "linux" | "win32" | "cygwin" | "darwin") {
-                checker.diagnostics.push(Diagnostic::new(
+            if !matches!(value.to_str(), "linux" | "win32" | "cygwin" | "darwin") {
+                checker.report_diagnostic(Diagnostic::new(
                     UnrecognizedPlatformName {
-                        platform: value.clone(),
+                        platform: value.to_string(),
                     },
                     right.range(),
                 ));
@@ -138,9 +135,7 @@ pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
         }
     } else {
         if checker.enabled(Rule::UnrecognizedPlatformCheck) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
+            checker.report_diagnostic(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
         }
     }
 }

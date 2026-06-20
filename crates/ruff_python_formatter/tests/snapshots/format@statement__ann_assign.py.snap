@@ -1,6 +1,7 @@
 ---
 source: crates/ruff_python_formatter/tests/fixtures.rs
 input_file: crates/ruff_python_formatter/resources/test/fixtures/ruff/statement/ann_assign.py
+snapshot_kind: text
 ---
 ## Input
 ```python
@@ -39,9 +40,9 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = (
     Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb()
 )
 
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: (
-    Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-) = Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb()
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = (
+    Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb()
+)
 
 JSONSerializable: TypeAlias = (
     "str | int | float | bool | None | list | tuple | JSONMapping"
@@ -61,10 +62,7 @@ JSONSerializable: str | int | float | bool | None | list | tuple | JSONMapping =
 
 # Regression test: Don't forget the parentheses in the annotation when breaking
 class DefaultRunner:
-    task_runner_cls: TaskRunnerProtocol | typing.Callable[
-        [], typing.Any
-    ] = DefaultTaskRunner
+    task_runner_cls: TaskRunnerProtocol | typing.Callable[[], typing.Any] = (
+        DefaultTaskRunner
+    )
 ```
-
-
-

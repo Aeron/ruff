@@ -1,10 +1,10 @@
 use ruff_python_ast::{self as ast, Arguments, Expr, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::identifier::Identifier;
 
-use crate::settings::types::IdentifierPattern;
+use crate::rules::pep8_naming::settings::IgnoreNames;
 
 /// ## What it does
 /// Checks for custom exception definitions that omit the `Error` suffix.
@@ -17,20 +17,20 @@ use crate::settings::types::IdentifierPattern;
 /// > exception names (if the exception actually is an error).
 ///
 /// ## Example
+///
 /// ```python
-/// class Validation(Exception):
-///     ...
+/// class Validation(Exception): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// class ValidationError(Exception):
-///     ...
+/// class ValidationError(Exception): ...
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#exception-names
-#[violation]
-pub struct ErrorSuffixOnExceptionName {
+#[derive(ViolationMetadata)]
+pub(crate) struct ErrorSuffixOnExceptionName {
     name: String,
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn error_suffix_on_exception_name(
     class_def: &Stmt,
     arguments: Option<&Arguments>,
     name: &str,
-    ignore_names: &[IdentifierPattern],
+    ignore_names: &IgnoreNames,
 ) -> Option<Diagnostic> {
     if name.ends_with("Error") {
         return None;
@@ -65,10 +65,8 @@ pub(crate) fn error_suffix_on_exception_name(
         return None;
     }
 
-    if ignore_names
-        .iter()
-        .any(|ignore_name| ignore_name.matches(name))
-    {
+    // Ignore any explicitly-allowed names.
+    if ignore_names.matches(name) {
         return None;
     }
 

@@ -1,5 +1,5 @@
-use ruff_diagnostics::{Diagnostic, Edit, Fix, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr, ExprAttribute, ExprCall};
 use ruff_text_size::Ranged;
 
@@ -25,18 +25,24 @@ use crate::{checkers::ast::Checker, importer::ImportRequest};
 /// ## References
 /// - [Python documentation: `Path.cwd`](https://docs.python.org/3/library/pathlib.html#pathlib.Path.cwd)
 
-#[violation]
-pub struct ImplicitCwd;
+#[derive(ViolationMetadata)]
+pub(crate) struct ImplicitCwd;
 
 impl Violation for ImplicitCwd {
+    const FIX_AVAILABILITY: FixAvailability = FixAvailability::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Prefer `Path.cwd()` over `Path().resolve()` for current-directory lookups")
+        "Prefer `Path.cwd()` over `Path().resolve()` for current-directory lookups".to_string()
+    }
+
+    fn fix_title(&self) -> Option<String> {
+        Some("Replace `Path().resolve()` with `Path.cwd()`".to_string())
     }
 }
 
 /// FURB177
-pub(crate) fn no_implicit_cwd(checker: &mut Checker, call: &ExprCall) {
+pub(crate) fn no_implicit_cwd(checker: &Checker, call: &ExprCall) {
     if !call.arguments.is_empty() {
         return;
     }
@@ -58,7 +64,7 @@ pub(crate) fn no_implicit_cwd(checker: &mut Checker, call: &ExprCall) {
 
     // Match on arguments, but ignore keyword arguments. `Path()` accepts keyword arguments, but
     // ignores them. See: https://github.com/python/cpython/issues/98094.
-    match arguments.args.as_slice() {
+    match &*arguments.args {
         // Ex) `Path().resolve()`
         [] => {}
         // Ex) `Path(".").resolve()`
@@ -66,7 +72,7 @@ pub(crate) fn no_implicit_cwd(checker: &mut Checker, call: &ExprCall) {
             let Expr::StringLiteral(ast::ExprStringLiteral { value, .. }) = arg else {
                 return;
             };
-            if !matches!(value.as_str(), "" | ".") {
+            if !matches!(value.to_str(), "" | ".") {
                 return;
             }
         }
@@ -76,8 +82,8 @@ pub(crate) fn no_implicit_cwd(checker: &mut Checker, call: &ExprCall) {
 
     if !checker
         .semantic()
-        .resolve_call_path(func)
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["pathlib", "Path"]))
+        .resolve_qualified_name(func)
+        .is_some_and(|qualified_name| matches!(qualified_name.segments(), ["pathlib", "Path"]))
     {
         return;
     }
@@ -96,7 +102,5 @@ pub(crate) fn no_implicit_cwd(checker: &mut Checker, call: &ExprCall) {
         ))
     });
 
-    checker
-        .diagnostics
-        .push(Diagnostic::new(ImplicitCwd, call.range()));
+    checker.report_diagnostic(diagnostic);
 }

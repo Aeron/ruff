@@ -1,12 +1,13 @@
 ---
 source: crates/ruff_python_formatter/src/comments/debug.rs
 expression: comments.debug(source_code)
+snapshot_kind: text
 ---
 {
     Node {
         kind: StmtContinue,
-        range: 0..0,
-        source: ``,
+        range: 18..26,
+        source: `continue`,
     }: {
         "leading": [
             SourceComment {
@@ -26,8 +27,8 @@ expression: comments.debug(source_code)
     },
     Node {
         kind: StmtBreak,
-        range: 0..0,
-        source: ``,
+        range: 55..60,
+        source: `break`,
     }: {
         "leading": [
             SourceComment {

@@ -1,10 +1,10 @@
 use ruff_python_ast::Stmt;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::identifier::Identifier;
 
-use crate::settings::types::IdentifierPattern;
+use crate::rules::pep8_naming::settings::IgnoreNames;
 
 /// ## What it does
 /// Checks for class names that do not follow the `CamelCase` convention.
@@ -35,8 +35,8 @@ use crate::settings::types::IdentifierPattern;
 /// ```
 ///
 /// [PEP 8]: https://peps.python.org/pep-0008/#class-names
-#[violation]
-pub struct InvalidClassName {
+#[derive(ViolationMetadata)]
+pub(crate) struct InvalidClassName {
     name: String,
 }
 
@@ -44,7 +44,7 @@ impl Violation for InvalidClassName {
     #[derive_message_formats]
     fn message(&self) -> String {
         let InvalidClassName { name } = self;
-        format!("Class name `{name}` should use CapWords convention ")
+        format!("Class name `{name}` should use CapWords convention")
     }
 }
 
@@ -52,17 +52,14 @@ impl Violation for InvalidClassName {
 pub(crate) fn invalid_class_name(
     class_def: &Stmt,
     name: &str,
-    ignore_names: &[IdentifierPattern],
+    ignore_names: &IgnoreNames,
 ) -> Option<Diagnostic> {
-    if ignore_names
-        .iter()
-        .any(|ignore_name| ignore_name.matches(name))
-    {
-        return None;
-    }
-
-    let stripped = name.strip_prefix('_').unwrap_or(name);
+    let stripped = name.trim_start_matches('_');
     if !stripped.chars().next().is_some_and(char::is_uppercase) || stripped.contains('_') {
+        // Ignore any explicitly-allowed names.
+        if ignore_names.matches(name) {
+            return None;
+        }
         return Some(Diagnostic::new(
             InvalidClassName {
                 name: name.to_string(),

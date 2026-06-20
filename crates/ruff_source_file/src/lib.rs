@@ -1,21 +1,22 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
+use std::fmt::{Debug, Display, Formatter};
+use std::sync::{Arc, OnceLock};
 
-use ruff_text_size::{Ranged, TextRange, TextSize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-pub mod line_index;
-mod locator;
-pub mod newlines;
+use ruff_text_size::{Ranged, TextRange, TextSize};
 
 pub use crate::line_index::{LineIndex, OneIndexed};
-pub use locator::Locator;
-pub use newlines::{
+pub use crate::line_ranges::LineRanges;
+pub use crate::newlines::{
     find_newline, Line, LineEnding, NewlineWithTrailingNewline, UniversalNewlineIterator,
     UniversalNewlines,
 };
+
+mod line_index;
+mod line_ranges;
+mod newlines;
 
 /// Gives access to the source code of a file and allows mapping between [`TextSize`] and [`SourceLocation`].
 #[derive(Debug)]
@@ -133,9 +134,9 @@ impl SourceFileBuilder {
     /// Consumes `self` and returns the [`SourceFile`].
     pub fn finish(self) -> SourceFile {
         let index = if let Some(index) = self.index {
-            once_cell::sync::OnceCell::with_value(index)
+            OnceLock::from(index)
         } else {
-            once_cell::sync::OnceCell::new()
+            OnceLock::new()
         };
 
         SourceFile {
@@ -217,7 +218,7 @@ impl Ord for SourceFile {
 struct SourceFileInner {
     name: Box<str>,
     code: Box<str>,
-    line_index: once_cell::sync::OnceCell<LineIndex>,
+    line_index: OnceLock<LineIndex>,
 }
 
 impl PartialEq for SourceFileInner {
@@ -250,5 +251,28 @@ impl Debug for SourceLocation {
             .field("row", &self.row.get())
             .field("column", &self.column.get())
             .finish()
+    }
+}
+
+impl std::fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{row}:{column}", row = self.row, column = self.column)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum SourceRow {
+    /// A row within a cell in a Jupyter Notebook.
+    Notebook { cell: OneIndexed, line: OneIndexed },
+    /// A row within a source file.
+    SourceFile { line: OneIndexed },
+}
+
+impl Display for SourceRow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceRow::Notebook { cell, line } => write!(f, "cell {cell}, line {line}"),
+            SourceRow::SourceFile { line } => write!(f, "line {line}"),
+        }
     }
 }

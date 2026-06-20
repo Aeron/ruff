@@ -1,20 +1,19 @@
-use std::cmp::Ordering;
-
+use ast::helpers::comment_indentation_after;
 use ruff_python_ast::whitespace::indentation;
 use ruff_python_ast::{
-    self as ast, AnyNodeRef, Comprehension, Expr, MatchCase, ModModule, Parameters,
+    self as ast, AnyNodeRef, Comprehension, Expr, ModModule, Parameter, Parameters, StringLike,
 };
 use ruff_python_trivia::{
-    find_only_token_in_range, indentation_at_offset, BackwardsTokenizer, CommentRanges,
-    SimpleToken, SimpleTokenKind, SimpleTokenizer,
+    find_only_token_in_range, first_non_trivia_token, indentation_at_offset, BackwardsTokenizer,
+    CommentRanges, SimpleToken, SimpleTokenKind, SimpleTokenizer,
 };
-use ruff_source_file::Locator;
-use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
+use ruff_source_file::LineRanges;
+use ruff_text_size::{Ranged, TextLen, TextRange};
+use std::cmp::Ordering;
 
 use crate::comments::visitor::{CommentPlacement, DecoratedComment};
-use crate::expression::expr_generator_exp::is_generator_parenthesized;
 use crate::expression::expr_slice::{assign_comment_in_slice, ExprSliceCommentSection};
-use crate::expression::expr_tuple::is_tuple_parenthesized;
+use crate::expression::parentheses::is_expression_parenthesized;
 use crate::other::parameters::{
     assign_argument_separator_comment_placement, find_parameter_separators,
 };
@@ -24,12 +23,12 @@ use crate::pattern::pattern_match_sequence::SequenceType;
 pub(super) fn place_comment<'a>(
     comment: DecoratedComment<'a>,
     comment_ranges: &CommentRanges,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
-    handle_parenthesized_comment(comment, locator)
-        .or_else(|comment| handle_end_of_line_comment_around_body(comment, locator))
-        .or_else(|comment| handle_own_line_comment_around_body(comment, locator))
-        .or_else(|comment| handle_enclosed_comment(comment, comment_ranges, locator))
+    handle_parenthesized_comment(comment, source)
+        .or_else(|comment| handle_end_of_line_comment_around_body(comment, source))
+        .or_else(|comment| handle_own_line_comment_around_body(comment, source))
+        .or_else(|comment| handle_enclosed_comment(comment, comment_ranges, source))
 }
 
 /// Handle parenthesized comments. A parenthesized comment is a comment that appears within a
@@ -72,7 +71,7 @@ pub(super) fn place_comment<'a>(
 /// comment is a leading comment of the following node.
 fn handle_parenthesized_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     // As a special-case, ignore comments within f-strings, like:
     // ```python
@@ -134,7 +133,7 @@ fn handle_parenthesized_comment<'a>(
     // ]
     // ```
     let range = TextRange::new(preceding.end(), comment.start());
-    let tokenizer = SimpleTokenizer::new(locator.contents(), range);
+    let tokenizer = SimpleTokenizer::new(source, range);
     if tokenizer
         .skip_trivia()
         .take_while(|token| {
@@ -147,7 +146,7 @@ fn handle_parenthesized_comment<'a>(
             debug_assert!(
                 !matches!(token.kind, SimpleTokenKind::Bogus),
                 "Unexpected token between nodes: `{:?}`",
-                locator.slice(range)
+                &source[range]
             );
             token.kind() == SimpleTokenKind::LParen
         })
@@ -165,7 +164,7 @@ fn handle_parenthesized_comment<'a>(
     // ]
     // ```
     let range = TextRange::new(comment.end(), following.start());
-    let tokenizer = SimpleTokenizer::new(locator.contents(), range);
+    let tokenizer = SimpleTokenizer::new(source, range);
     if tokenizer
         .skip_trivia()
         .take_while(|token| {
@@ -178,7 +177,7 @@ fn handle_parenthesized_comment<'a>(
             debug_assert!(
                 !matches!(token.kind, SimpleTokenKind::Bogus),
                 "Unexpected token between nodes: `{:?}`",
-                locator.slice(range)
+                &source[range]
             );
             token.kind() == SimpleTokenKind::RParen
         })
@@ -193,87 +192,120 @@ fn handle_parenthesized_comment<'a>(
 fn handle_enclosed_comment<'a>(
     comment: DecoratedComment<'a>,
     comment_ranges: &CommentRanges,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     match comment.enclosing_node() {
         AnyNodeRef::Parameters(parameters) => {
-            handle_parameters_separator_comment(comment, parameters, locator).or_else(|comment| {
-                if are_parameters_parenthesized(parameters, locator.contents()) {
-                    handle_bracketed_end_of_line_comment(comment, locator)
+            handle_parameters_separator_comment(comment, parameters, source).or_else(|comment| {
+                if are_parameters_parenthesized(parameters, source) {
+                    handle_bracketed_end_of_line_comment(comment, source)
                 } else {
                     CommentPlacement::Default(comment)
                 }
             })
         }
+        AnyNodeRef::Parameter(parameter) => handle_parameter_comment(comment, parameter, source),
         AnyNodeRef::Arguments(_) | AnyNodeRef::TypeParams(_) | AnyNodeRef::PatternArguments(_) => {
-            handle_bracketed_end_of_line_comment(comment, locator)
+            handle_bracketed_end_of_line_comment(comment, source)
         }
         AnyNodeRef::Comprehension(comprehension) => {
-            handle_comprehension_comment(comment, comprehension, locator)
+            handle_comprehension_comment(comment, comprehension, source)
         }
 
         AnyNodeRef::ExprAttribute(attribute) => {
-            handle_attribute_comment(comment, attribute, locator)
+            handle_attribute_comment(comment, attribute, source)
         }
         AnyNodeRef::ExprBinOp(binary_expression) => {
             handle_trailing_binary_expression_left_or_operator_comment(
                 comment,
                 binary_expression,
-                locator,
+                source,
             )
         }
         AnyNodeRef::ExprBoolOp(_) | AnyNodeRef::ExprCompare(_) => {
-            handle_trailing_binary_like_comment(comment, locator)
+            handle_trailing_binary_like_comment(comment, source)
         }
-        AnyNodeRef::Keyword(keyword) => handle_keyword_comment(comment, keyword, locator),
+        AnyNodeRef::Keyword(keyword) => handle_keyword_comment(comment, keyword, source),
         AnyNodeRef::PatternKeyword(pattern_keyword) => {
-            handle_pattern_keyword_comment(comment, pattern_keyword, locator)
+            handle_pattern_keyword_comment(comment, pattern_keyword, source)
         }
-        AnyNodeRef::ExprUnaryOp(unary_op) => handle_unary_op_comment(comment, unary_op, locator),
-        AnyNodeRef::ExprNamedExpr(_) => handle_named_expr_comment(comment, locator),
-        AnyNodeRef::ExprLambda(lambda) => handle_lambda_comment(comment, lambda, locator),
-        AnyNodeRef::ExprDict(_) => handle_dict_unpacking_comment(comment, locator)
-            .or_else(|comment| handle_bracketed_end_of_line_comment(comment, locator))
-            .or_else(|comment| handle_key_value_comment(comment, locator)),
-        AnyNodeRef::ExprDictComp(_) => handle_key_value_comment(comment, locator)
-            .or_else(|comment| handle_bracketed_end_of_line_comment(comment, locator)),
-        AnyNodeRef::ExprIfExp(expr_if) => handle_expr_if_comment(comment, expr_if, locator),
+        AnyNodeRef::ExprUnaryOp(unary_op) => handle_unary_op_comment(comment, unary_op, source),
+        AnyNodeRef::ExprNamed(_) => handle_named_expr_comment(comment, source),
+        AnyNodeRef::ExprLambda(lambda) => handle_lambda_comment(comment, lambda, source),
+        AnyNodeRef::ExprDict(_) => handle_dict_unpacking_comment(comment, source)
+            .or_else(|comment| handle_bracketed_end_of_line_comment(comment, source))
+            .or_else(|comment| handle_key_value_comment(comment, source)),
+        AnyNodeRef::ExprDictComp(_) => handle_key_value_comment(comment, source)
+            .or_else(|comment| handle_bracketed_end_of_line_comment(comment, source)),
+        AnyNodeRef::ExprIf(expr_if) => handle_expr_if_comment(comment, expr_if, source),
         AnyNodeRef::ExprSlice(expr_slice) => {
-            handle_slice_comments(comment, expr_slice, comment_ranges, locator)
+            handle_slice_comments(comment, expr_slice, comment_ranges, source)
         }
         AnyNodeRef::ExprStarred(starred) => {
-            handle_trailing_expression_starred_star_end_of_line_comment(comment, starred, locator)
+            handle_trailing_expression_starred_star_end_of_line_comment(comment, starred, source)
         }
         AnyNodeRef::ExprSubscript(expr_subscript) => {
             if let Expr::Slice(expr_slice) = expr_subscript.slice.as_ref() {
-                handle_slice_comments(comment, expr_slice, comment_ranges, locator)
-            } else {
-                CommentPlacement::Default(comment)
+                return handle_slice_comments(comment, expr_slice, comment_ranges, source);
             }
+
+            // Handle non-slice subscript end-of-line comments coming after the `[`
+            // ```python
+            // repro(
+            //     "some long string that takes up some space"
+            //  )[  # some long comment also taking up space
+            //     0
+            // ]
+            // ```
+            if comment.line_position().is_end_of_line()
+                && expr_subscript.value.end() < comment.start()
+            {
+                // Ensure that there are no tokens between the open bracket and the comment.
+                let mut lexer = SimpleTokenizer::new(
+                    source,
+                    TextRange::new(expr_subscript.value.end(), comment.start()),
+                )
+                .skip_trivia();
+
+                // Skip to after the opening parenthesis (may skip some closing parentheses of value)
+                if !lexer
+                    .by_ref()
+                    .any(|token| token.kind() == SimpleTokenKind::LBracket)
+                {
+                    return CommentPlacement::Default(comment);
+                };
+
+                // If there are no additional tokens between the open parenthesis and the comment, then
+                // it should be attached as a dangling comment on the brackets, rather than a leading
+                // comment on the first argument.
+                if lexer.next().is_none() {
+                    return CommentPlacement::dangling(expr_subscript, comment);
+                }
+            }
+
+            CommentPlacement::Default(comment)
         }
         AnyNodeRef::ModModule(module) => {
             handle_trailing_module_comment(module, comment).or_else(|comment| {
                 handle_module_level_own_line_comment_before_class_or_function_comment(
-                    comment, locator,
+                    comment, source,
                 )
             })
         }
-        AnyNodeRef::WithItem(_) => handle_with_item_comment(comment, locator),
+        AnyNodeRef::WithItem(_) => handle_with_item_comment(comment, source),
         AnyNodeRef::PatternMatchSequence(pattern_match_sequence) => {
-            if SequenceType::from_pattern(pattern_match_sequence, locator.contents())
-                .is_parenthesized()
-            {
-                handle_bracketed_end_of_line_comment(comment, locator)
+            if SequenceType::from_pattern(pattern_match_sequence, source).is_parenthesized() {
+                handle_bracketed_end_of_line_comment(comment, source)
             } else {
                 CommentPlacement::Default(comment)
             }
         }
         AnyNodeRef::PatternMatchClass(class) => handle_pattern_match_class_comment(comment, class),
-        AnyNodeRef::PatternMatchAs(_) => handle_pattern_match_as_comment(comment, locator),
+        AnyNodeRef::PatternMatchAs(_) => handle_pattern_match_as_comment(comment, source),
         AnyNodeRef::PatternMatchStar(_) => handle_pattern_match_star_comment(comment),
         AnyNodeRef::PatternMatchMapping(pattern) => {
-            handle_bracketed_end_of_line_comment(comment, locator)
-                .or_else(|comment| handle_pattern_match_mapping_comment(comment, pattern, locator))
+            handle_bracketed_end_of_line_comment(comment, source)
+                .or_else(|comment| handle_pattern_match_mapping_comment(comment, pattern, source))
         }
         AnyNodeRef::StmtFunctionDef(_) => handle_leading_function_with_decorators_comment(comment),
         AnyNodeRef::StmtClassDef(class_def) => {
@@ -283,25 +315,81 @@ fn handle_enclosed_comment<'a>(
         AnyNodeRef::StmtWith(with_) => handle_with_comment(comment, with_),
         AnyNodeRef::ExprCall(_) => handle_call_comment(comment),
         AnyNodeRef::ExprStringLiteral(_) => {
-            if let Some(AnyNodeRef::ExprFString(fstring)) = comment.enclosing_parent() {
+            if let Some(AnyNodeRef::FString(fstring)) = comment.enclosing_parent() {
                 CommentPlacement::dangling(fstring, comment)
             } else {
                 CommentPlacement::Default(comment)
             }
         }
-        AnyNodeRef::ExprFString(fstring) => CommentPlacement::dangling(fstring, comment),
+        AnyNodeRef::FString(fstring) => CommentPlacement::dangling(fstring, comment),
+        AnyNodeRef::FStringExpressionElement(_) => {
+            // Handle comments after the format specifier (should be rare):
+            //
+            // ```python
+            // f"literal {
+            //     expr:.3f
+            //     # comment
+            // }"
+            // ```
+            //
+            // This is a valid comment placement.
+            if matches!(
+                comment.preceding_node(),
+                Some(
+                    AnyNodeRef::FStringExpressionElement(_) | AnyNodeRef::FStringLiteralElement(_)
+                )
+            ) {
+                CommentPlacement::trailing(comment.enclosing_node(), comment)
+            } else {
+                handle_bracketed_end_of_line_comment(comment, source)
+            }
+        }
         AnyNodeRef::ExprList(_)
         | AnyNodeRef::ExprSet(_)
         | AnyNodeRef::ExprListComp(_)
-        | AnyNodeRef::ExprSetComp(_) => handle_bracketed_end_of_line_comment(comment, locator),
-        AnyNodeRef::ExprTuple(tuple) if is_tuple_parenthesized(tuple, locator.contents()) => {
-            handle_bracketed_end_of_line_comment(comment, locator)
+        | AnyNodeRef::ExprSetComp(_) => handle_bracketed_end_of_line_comment(comment, source),
+        AnyNodeRef::ExprTuple(ast::ExprTuple {
+            parenthesized: true,
+            ..
+        }) => handle_bracketed_end_of_line_comment(comment, source),
+        AnyNodeRef::ExprGenerator(generator) if generator.parenthesized => {
+            handle_bracketed_end_of_line_comment(comment, source)
         }
-        AnyNodeRef::ExprGeneratorExp(generator)
-            if is_generator_parenthesized(generator, locator.contents()) =>
+        AnyNodeRef::StmtReturn(_) => {
+            handle_trailing_implicit_concatenated_string_comment(comment, comment_ranges, source)
+        }
+        AnyNodeRef::StmtAssign(assignment)
+            if comment.preceding_node().is_some_and(|preceding| {
+                preceding.ptr_eq(AnyNodeRef::from(&*assignment.value))
+            }) =>
         {
-            handle_bracketed_end_of_line_comment(comment, locator)
+            handle_trailing_implicit_concatenated_string_comment(comment, comment_ranges, source)
         }
+        AnyNodeRef::StmtAnnAssign(assignment)
+            if comment.preceding_node().is_some_and(|preceding| {
+                assignment
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| preceding.ptr_eq(value.into()))
+            }) =>
+        {
+            handle_trailing_implicit_concatenated_string_comment(comment, comment_ranges, source)
+        }
+        AnyNodeRef::StmtAugAssign(assignment)
+            if comment.preceding_node().is_some_and(|preceding| {
+                preceding.ptr_eq(AnyNodeRef::from(&*assignment.value))
+            }) =>
+        {
+            handle_trailing_implicit_concatenated_string_comment(comment, comment_ranges, source)
+        }
+        AnyNodeRef::StmtTypeAlias(assignment)
+            if comment.preceding_node().is_some_and(|preceding| {
+                preceding.ptr_eq(AnyNodeRef::from(&*assignment.value))
+            }) =>
+        {
+            handle_trailing_implicit_concatenated_string_comment(comment, comment_ranges, source)
+        }
+
         _ => CommentPlacement::Default(comment),
     }
 }
@@ -309,7 +397,7 @@ fn handle_enclosed_comment<'a>(
 /// Handle an end-of-line comment around a body.
 fn handle_end_of_line_comment_around_body<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if comment.line_position().is_own_line() {
         return CommentPlacement::Default(comment);
@@ -323,14 +411,11 @@ fn handle_end_of_line_comment_around_body<'a>(
     //     pass
     // ```
     if let Some(following) = comment.following_node() {
-        if is_first_statement_in_body(following, comment.enclosing_node())
-            && SimpleTokenizer::new(
-                locator.contents(),
-                TextRange::new(comment.end(), following.start()),
-            )
-            .skip_trivia()
-            .next()
-            .is_none()
+        if following.is_first_statement_in_body(comment.enclosing_node())
+            && SimpleTokenizer::new(source, TextRange::new(comment.end(), following.start()))
+                .skip_trivia()
+                .next()
+                .is_none()
         {
             return CommentPlacement::dangling(comment.enclosing_node(), comment);
         }
@@ -360,86 +445,6 @@ fn handle_end_of_line_comment_around_body<'a>(
     CommentPlacement::Default(comment)
 }
 
-/// Check if the given statement is the first statement after the colon of a branch, be it in if
-/// statements, for statements, after each part of a try-except-else-finally or function/class
-/// definitions.
-///
-///
-/// ```python
-/// if True:    <- has body
-///     a       <- first statement
-///     b
-/// elif b:     <- has body
-///     c       <- first statement
-///     d
-/// else:       <- has body
-///     e       <- first statement
-///     f
-///
-/// class:      <- has body
-///     a: int  <- first statement
-///     b: int
-///
-/// ```
-///
-/// For nodes with multiple bodies, we check all bodies that don't have their own node. For
-/// try-except-else-finally, each except branch has it's own node, so for the `StmtTry`, we check
-/// the `try:`, `else:` and `finally:`, bodies, while `ExceptHandlerExceptHandler` has it's own
-/// check. For for-else and while-else, we check both branches for the whole statement.
-///
-/// ```python
-/// try:        <- has body (a)
-///     6/8     <- first statement (a)
-///     1/0
-/// except:     <- has body (b)
-///     a       <- first statement (b)
-///     b
-/// else:
-///     c       <- first statement (a)
-///     d
-/// finally:
-///     e       <- first statement (a)
-///     f
-/// ```
-fn is_first_statement_in_body(statement: AnyNodeRef, has_body: AnyNodeRef) -> bool {
-    match has_body {
-        AnyNodeRef::StmtFor(ast::StmtFor { body, orelse, .. })
-        | AnyNodeRef::StmtWhile(ast::StmtWhile { body, orelse, .. }) => {
-            are_same_optional(statement, body.first())
-                || are_same_optional(statement, orelse.first())
-        }
-
-        AnyNodeRef::StmtTry(ast::StmtTry {
-            body,
-            orelse,
-            finalbody,
-            ..
-        }) => {
-            are_same_optional(statement, body.first())
-                || are_same_optional(statement, orelse.first())
-                || are_same_optional(statement, finalbody.first())
-        }
-
-        AnyNodeRef::StmtIf(ast::StmtIf { body, .. })
-        | AnyNodeRef::ElifElseClause(ast::ElifElseClause { body, .. })
-        | AnyNodeRef::StmtWith(ast::StmtWith { body, .. })
-        | AnyNodeRef::ExceptHandlerExceptHandler(ast::ExceptHandlerExceptHandler {
-            body, ..
-        })
-        | AnyNodeRef::MatchCase(MatchCase { body, .. })
-        | AnyNodeRef::StmtFunctionDef(ast::StmtFunctionDef { body, .. })
-        | AnyNodeRef::StmtClassDef(ast::StmtClassDef { body, .. }) => {
-            are_same_optional(statement, body.first())
-        }
-
-        AnyNodeRef::StmtMatch(ast::StmtMatch { cases, .. }) => {
-            are_same_optional(statement, cases.first())
-        }
-
-        _ => false,
-    }
-}
-
 /// Handles own-line comments around a body (at the end of the body, at the end of the header
 /// preceding the body, or between bodies):
 ///
@@ -461,7 +466,7 @@ fn is_first_statement_in_body(statement: AnyNodeRef, has_body: AnyNodeRef) -> bo
 /// ```
 fn handle_own_line_comment_around_body<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if comment.line_position().is_end_of_line() {
         return CommentPlacement::Default(comment);
@@ -483,24 +488,22 @@ fn handle_own_line_comment_around_body<'a>(
     //     # default placement comment
     //     def inline_after_else(): ...
     // ```
-    let maybe_token = SimpleTokenizer::new(
-        locator.contents(),
-        TextRange::new(preceding.end(), comment.start()),
-    )
-    .skip_trivia()
-    .next();
+    let maybe_token =
+        SimpleTokenizer::new(source, TextRange::new(preceding.end(), comment.start()))
+            .skip_trivia()
+            .next();
     if maybe_token.is_some() {
         return CommentPlacement::Default(comment);
     }
 
     // Check if we're between bodies and should attach to the following body.
-    handle_own_line_comment_between_branches(comment, preceding, locator)
+    handle_own_line_comment_between_branches(comment, preceding, source)
         .or_else(|comment| {
             // Otherwise, there's no following branch or the indentation is too deep, so attach to the
             // recursively last statement in the preceding body with the matching indentation.
-            handle_own_line_comment_after_branch(comment, preceding, locator)
+            handle_own_line_comment_after_branch(comment, preceding, source)
         })
-        .or_else(|comment| handle_own_line_comment_between_statements(comment, locator))
+        .or_else(|comment| handle_own_line_comment_between_statements(comment, source))
 }
 
 /// Handles own-line comments between statements. If an own-line comment is between two statements,
@@ -525,7 +528,7 @@ fn handle_own_line_comment_around_body<'a>(
 /// ```
 fn handle_own_line_comment_between_statements<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let Some(preceding) = comment.preceding_node() else {
         return CommentPlacement::Default(comment);
@@ -565,7 +568,7 @@ fn handle_own_line_comment_between_statements<'a>(
     //
     // y = 2
     // ```
-    if max_empty_lines(locator.slice(TextRange::new(comment.end(), following.start()))) == 0 {
+    if max_empty_lines(&source[TextRange::new(comment.end(), following.start())]) == 0 {
         CommentPlacement::leading(following, comment)
     } else {
         CommentPlacement::trailing(preceding, comment)
@@ -584,22 +587,22 @@ fn handle_own_line_comment_between_statements<'a>(
 fn handle_own_line_comment_between_branches<'a>(
     comment: DecoratedComment<'a>,
     preceding: AnyNodeRef<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     // The following statement must be the first statement in an alternate body, otherwise check
     // if it's a comment after the final body and handle that case
     let Some(following) = comment.following_node() else {
         return CommentPlacement::Default(comment);
     };
-    if !is_first_statement_in_alternate_body(following, comment.enclosing_node()) {
+    if !following.is_first_statement_in_alternate_body(comment.enclosing_node()) {
         return CommentPlacement::Default(comment);
     }
 
     // It depends on the indentation level of the comment if it is a leading comment for the
     // following branch or if it a trailing comment of the previous body's last statement.
-    let comment_indentation = own_line_comment_indentation(preceding, &comment, locator);
+    let comment_indentation = comment_indentation_after(preceding, comment.range(), source);
 
-    let preceding_indentation = indentation(locator, &preceding)
+    let preceding_indentation = indentation(source, &preceding)
         .unwrap_or_default()
         .text_len();
 
@@ -673,7 +676,7 @@ fn handle_own_line_comment_between_branches<'a>(
 fn handle_own_line_comment_after_branch<'a>(
     comment: DecoratedComment<'a>,
     preceding: AnyNodeRef<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let Some(last_child) = preceding.last_child_in_body() else {
         return CommentPlacement::Default(comment);
@@ -681,7 +684,7 @@ fn handle_own_line_comment_after_branch<'a>(
 
     // We only care about the length because indentations with mixed spaces and tabs are only valid if
     // the indent-level doesn't depend on the tab width (the indent level must be the same if the tab width is 1 or 8).
-    let comment_indentation = own_line_comment_indentation(preceding, &comment, locator);
+    let comment_indentation = comment_indentation_after(preceding, comment.range(), source);
 
     // Keep the comment on the entire statement in case it's a trailing comment
     // ```python
@@ -692,7 +695,7 @@ fn handle_own_line_comment_after_branch<'a>(
     // # Trailing if comment
     // ```
     // Here we keep the comment a trailing comment of the `if`
-    let preceding_indentation = indentation_at_offset(preceding.start(), locator)
+    let preceding_indentation = indentation_at_offset(preceding.start(), source)
         .unwrap_or_default()
         .text_len();
     if comment_indentation == preceding_indentation {
@@ -703,7 +706,7 @@ fn handle_own_line_comment_after_branch<'a>(
     let mut last_child_in_parent = last_child;
 
     loop {
-        let child_indentation = indentation(locator, &last_child_in_parent)
+        let child_indentation = indentation(source, &last_child_in_parent)
             .unwrap_or_default()
             .text_len();
 
@@ -757,80 +760,6 @@ fn handle_own_line_comment_after_branch<'a>(
     }
 }
 
-/// Determine the indentation level of an own-line comment, defined as the minimum indentation of
-/// all comments between the preceding node and the comment, including the comment itself. In
-/// other words, we don't allow successive comments to ident _further_ than any preceding comments.
-///
-/// For example, given:
-/// ```python
-/// if True:
-///     pass
-///     # comment
-/// ```
-///
-/// The indentation would be 4, as the comment is indented by 4 spaces.
-///
-/// Given:
-/// ```python
-/// if True:
-///     pass
-/// # comment
-/// else:
-///     pass
-/// ```
-///
-/// The indentation would be 0, as the comment is not indented at all.
-///
-/// Given:
-/// ```python
-/// if True:
-///     pass
-///     # comment
-///         # comment
-/// ```
-///
-/// Both comments would be marked as indented at 4 spaces, as the indentation of the first comment
-/// is used for the second comment.
-///
-/// This logic avoids pathological cases like:
-/// ```python
-/// try:
-///     if True:
-///         if True:
-///             pass
-///
-///         # a
-///             # b
-///         # c
-/// except Exception:
-///     pass
-/// ```
-///
-/// If we don't use the minimum indentation of any preceding comments, we would mark `# b` as
-/// indented to the same depth as `pass`, which could in turn lead to us treating it as a trailing
-/// comment of `pass`, despite there being a comment between them that "resets" the indentation.
-fn own_line_comment_indentation(
-    preceding: AnyNodeRef,
-    comment: &DecoratedComment,
-    locator: &Locator,
-) -> TextSize {
-    let tokenizer = SimpleTokenizer::new(
-        locator.contents(),
-        TextRange::new(locator.full_line_end(preceding.end()), comment.end()),
-    );
-
-    tokenizer
-        .filter_map(|token| {
-            if token.kind() == SimpleTokenKind::Comment {
-                indentation_at_offset(token.start(), locator).map(TextLen::text_len)
-            } else {
-                None
-            }
-        })
-        .min()
-        .unwrap_or_default()
-}
-
 /// Attaches comments for the positional-only parameters separator `/` or the keywords-only
 /// parameters separator `*` as dangling comments to the enclosing [`Parameters`] node.
 ///
@@ -838,9 +767,9 @@ fn own_line_comment_indentation(
 fn handle_parameters_separator_comment<'a>(
     comment: DecoratedComment<'a>,
     parameters: &Parameters,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
-    let (slash, star) = find_parameter_separators(locator.contents(), parameters);
+    let (slash, star) = find_parameter_separators(source, parameters);
     let placement = assign_argument_separator_comment_placement(
         slash.as_ref(),
         star.as_ref(),
@@ -852,6 +781,41 @@ fn handle_parameters_separator_comment<'a>(
     }
 
     CommentPlacement::Default(comment)
+}
+
+/// Associate comments that come before the `:` starting the type annotation or before the
+/// parameter's name for unannotated parameters as leading parameter-comments.
+///
+/// The parameter's name isn't a node to which comments can be associated.
+/// That's why we pull out all comments that come before the expression name or the type annotation
+/// and make them leading parameter comments. For example:
+/// * `* # comment\nargs`
+/// * `arg # comment\n : int`
+///
+/// Associate comments with the type annotation when possible.
+fn handle_parameter_comment<'a>(
+    comment: DecoratedComment<'a>,
+    parameter: &'a Parameter,
+    source: &str,
+) -> CommentPlacement<'a> {
+    if parameter.annotation().is_some() {
+        let colon = first_non_trivia_token(parameter.name.end(), source).expect(
+            "A annotated parameter should have a colon following its name when it is valid syntax.",
+        );
+
+        assert_eq!(colon.kind(), SimpleTokenKind::Colon);
+
+        if comment.start() < colon.start() {
+            // The comment is before the colon, pull it out and make it a leading comment of the parameter.
+            CommentPlacement::leading(parameter, comment)
+        } else {
+            CommentPlacement::Default(comment)
+        }
+    } else if comment.start() < parameter.name.start() {
+        CommentPlacement::leading(parameter, comment)
+    } else {
+        CommentPlacement::Default(comment)
+    }
 }
 
 /// Handles comments between the left side and the operator of a binary expression (trailing comments of the left),
@@ -868,7 +832,7 @@ fn handle_parameters_separator_comment<'a>(
 fn handle_trailing_binary_expression_left_or_operator_comment<'a>(
     comment: DecoratedComment<'a>,
     binary_expression: &'a ast::ExprBinOp,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     // Only if there's a preceding node (in which case, the preceding node is `left`).
     if comment.preceding_node().is_none() || comment.following_node().is_none() {
@@ -880,7 +844,7 @@ fn handle_trailing_binary_expression_left_or_operator_comment<'a>(
         binary_expression.right.start(),
     );
 
-    let mut tokens = SimpleTokenizer::new(locator.contents(), between_operands_range)
+    let mut tokens = SimpleTokenizer::new(source, between_operands_range)
         .skip_trivia()
         .skip_while(|token| token.kind == SimpleTokenKind::RParen);
     let operator_offset = tokens
@@ -900,10 +864,10 @@ fn handle_trailing_binary_expression_left_or_operator_comment<'a>(
         CommentPlacement::trailing(binary_expression.left.as_ref(), comment)
     } else if comment.line_position().is_end_of_line() {
         // Is the operator on its own line.
-        if locator.contains_line_break(TextRange::new(
+        if source.contains_line_break(TextRange::new(
             binary_expression.left.end(),
             operator_offset,
-        )) && locator.contains_line_break(TextRange::new(
+        )) && source.contains_line_break(TextRange::new(
             operator_offset,
             binary_expression.right.start(),
         )) {
@@ -957,7 +921,7 @@ fn handle_trailing_binary_expression_left_or_operator_comment<'a>(
 /// ```
 fn handle_trailing_binary_like_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(
         comment.enclosing_node().is_expr_bool_op() || comment.enclosing_node().is_expr_compare()
@@ -972,7 +936,7 @@ fn handle_trailing_binary_like_comment<'a>(
 
     let between_operands_range = TextRange::new(left_operand.end(), right_operand.start());
 
-    let mut tokens = SimpleTokenizer::new(locator.contents(), between_operands_range)
+    let mut tokens = SimpleTokenizer::new(source, between_operands_range)
         .skip_trivia()
         .skip_while(|token| token.kind == SimpleTokenKind::RParen);
     let operator_offset = tokens
@@ -1054,7 +1018,7 @@ fn handle_trailing_module_comment<'a>(
 /// a trailing comment of the previous statement.
 fn handle_module_level_own_line_comment_before_class_or_function_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(comment.enclosing_node().is_module());
     // Only applies for own line comments on the module level...
@@ -1077,7 +1041,7 @@ fn handle_module_level_own_line_comment_before_class_or_function_comment<'a>(
     }
 
     // Make the comment a leading comment if there's no empty line between the comment and the function / class header
-    if max_empty_lines(locator.slice(TextRange::new(comment.end(), following.start()))) == 0 {
+    if max_empty_lines(&source[TextRange::new(comment.end(), following.start())]) == 0 {
         CommentPlacement::leading(following, comment)
     } else {
         // Otherwise attach the comment as trailing comment to the previous statement
@@ -1098,7 +1062,7 @@ fn handle_slice_comments<'a>(
     comment: DecoratedComment<'a>,
     expr_slice: &'a ast::ExprSlice,
     comment_ranges: &CommentRanges,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let ast::ExprSlice {
         range: _,
@@ -1109,7 +1073,7 @@ fn handle_slice_comments<'a>(
 
     // Check for `foo[ # comment`, but only if they are on the same line
     let after_lbracket = matches!(
-        BackwardsTokenizer::up_to(comment.start(), locator.contents(), comment_ranges)
+        BackwardsTokenizer::up_to(comment.start(), source, comment_ranges)
             .skip_trivia()
             .next(),
         Some(SimpleToken {
@@ -1133,7 +1097,7 @@ fn handle_slice_comments<'a>(
         return CommentPlacement::dangling(comment.enclosing_node(), comment);
     }
 
-    let assignment = assign_comment_in_slice(comment.range(), locator.contents(), expr_slice);
+    let assignment = assign_comment_in_slice(comment.range(), source, expr_slice);
     let node = match assignment {
         ExprSliceCommentSection::Lower => lower,
         ExprSliceCommentSection::Upper => upper,
@@ -1170,7 +1134,7 @@ fn handle_leading_function_with_decorators_comment(comment: DecoratedComment) ->
 
     let is_following_parameters = comment
         .following_node()
-        .is_some_and(|node| node.is_parameters());
+        .is_some_and(|node| node.is_parameters() || node.is_type_params());
 
     if comment.line_position().is_own_line() && is_preceding_decorator && is_following_parameters {
         CommentPlacement::dangling(comment.enclosing_node(), comment)
@@ -1219,7 +1183,7 @@ fn handle_leading_class_with_decorators_comment<'a>(
 fn handle_keyword_comment<'a>(
     comment: DecoratedComment<'a>,
     keyword: &'a ast::Keyword,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let start = keyword.arg.as_ref().map_or(keyword.start(), Ranged::end);
 
@@ -1231,8 +1195,7 @@ fn handle_keyword_comment<'a>(
     //     )
     // )
     // ```
-    let mut tokenizer =
-        SimpleTokenizer::new(locator.contents(), TextRange::new(start, comment.start()));
+    let mut tokenizer = SimpleTokenizer::new(source, TextRange::new(start, comment.start()));
     if tokenizer.any(|token| token.kind == SimpleTokenKind::LParen) {
         return CommentPlacement::Default(comment);
     }
@@ -1252,7 +1215,7 @@ fn handle_keyword_comment<'a>(
 fn handle_pattern_keyword_comment<'a>(
     comment: DecoratedComment<'a>,
     pattern_keyword: &'a ast::PatternKeyword,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     // If the comment is parenthesized, it should be attached to the value:
     // ```python
@@ -1263,7 +1226,7 @@ fn handle_pattern_keyword_comment<'a>(
     // )
     // ```
     let mut tokenizer = SimpleTokenizer::new(
-        locator.contents(),
+        source,
         TextRange::new(pattern_keyword.attr.end(), comment.start()),
     );
     if tokenizer.any(|token| token.kind == SimpleTokenKind::LParen) {
@@ -1285,7 +1248,7 @@ fn handle_pattern_keyword_comment<'a>(
 /// ```
 fn handle_dict_unpacking_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(matches!(comment.enclosing_node(), AnyNodeRef::ExprDict(_)));
 
@@ -1300,12 +1263,9 @@ fn handle_dict_unpacking_comment<'a>(
         Some(preceding) => preceding.end(),
         None => comment.enclosing_node().start(),
     };
-    let mut tokens = SimpleTokenizer::new(
-        locator.contents(),
-        TextRange::new(preceding_end, comment.start()),
-    )
-    .skip_trivia()
-    .skip_while(|token| token.kind == SimpleTokenKind::RParen);
+    let mut tokens = SimpleTokenizer::new(source, TextRange::new(preceding_end, comment.start()))
+        .skip_trivia()
+        .skip_while(|token| token.kind == SimpleTokenKind::RParen);
 
     // if the remaining tokens from the previous node are exactly `**`,
     // re-assign the comment to the one that follows the stars.
@@ -1328,7 +1288,7 @@ fn handle_dict_unpacking_comment<'a>(
 /// ```
 fn handle_key_value_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(matches!(
         comment.enclosing_node(),
@@ -1348,10 +1308,7 @@ fn handle_key_value_comment<'a>(
     // }
     // ```
     // This prevents against detecting comments on starred expressions as key-value comments.
-    let tokens = SimpleTokenizer::new(
-        locator.contents(),
-        TextRange::new(preceding.end(), following.start()),
-    );
+    let tokens = SimpleTokenizer::new(source, TextRange::new(preceding.end(), following.start()));
     if tokens
         .skip_trivia()
         .any(|token| token.kind == SimpleTokenKind::Colon)
@@ -1398,7 +1355,7 @@ fn handle_call_comment(comment: DecoratedComment) -> CommentPlacement {
 fn handle_attribute_comment<'a>(
     comment: DecoratedComment<'a>,
     attribute: &'a ast::ExprAttribute,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if comment.preceding_node().is_none() {
         // ```text
@@ -1429,7 +1386,7 @@ fn handle_attribute_comment<'a>(
     //     .attribute
     // )
     // ```
-    if let Some(right_paren) = SimpleTokenizer::starts_at(attribute.value.end(), locator.contents())
+    if let Some(right_paren) = SimpleTokenizer::starts_at(attribute.value.end(), source)
         .skip_trivia()
         .take_while(|token| token.kind == SimpleTokenKind::RParen)
         .last()
@@ -1462,7 +1419,7 @@ fn handle_attribute_comment<'a>(
         let dot_token = find_only_token_in_range(
             TextRange::new(attribute.value.end(), attribute.attr.start()),
             SimpleTokenKind::Dot,
-            locator.contents(),
+            source,
         );
         if comment.end() < dot_token.start() {
             return CommentPlacement::trailing(attribute.value.as_ref(), comment);
@@ -1489,10 +1446,10 @@ fn handle_attribute_comment<'a>(
 /// happens if the comments are in a weird position but it also doesn't hurt handling it.
 fn handle_expr_if_comment<'a>(
     comment: DecoratedComment<'a>,
-    expr_if: &'a ast::ExprIfExp,
-    locator: &Locator,
+    expr_if: &'a ast::ExprIf,
+    source: &str,
 ) -> CommentPlacement<'a> {
-    let ast::ExprIfExp {
+    let ast::ExprIf {
         range: _,
         test,
         body,
@@ -1506,7 +1463,7 @@ fn handle_expr_if_comment<'a>(
     let if_token = find_only_token_in_range(
         TextRange::new(body.end(), test.start()),
         SimpleTokenKind::If,
-        locator.contents(),
+        source,
     );
     // Between `if` and `test`
     if if_token.start() < comment.start() && comment.start() < test.start() {
@@ -1516,7 +1473,7 @@ fn handle_expr_if_comment<'a>(
     let else_token = find_only_token_in_range(
         TextRange::new(test.end(), orelse.start()),
         SimpleTokenKind::Else,
-        locator.contents(),
+        source,
     );
     // Between `else` and `orelse`
     if else_token.start() < comment.start() && comment.start() < orelse.start() {
@@ -1541,13 +1498,11 @@ fn handle_expr_if_comment<'a>(
 fn handle_trailing_expression_starred_star_end_of_line_comment<'a>(
     comment: DecoratedComment<'a>,
     starred: &'a ast::ExprStarred,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if comment.following_node().is_some() {
-        let tokenizer = SimpleTokenizer::new(
-            locator.contents(),
-            TextRange::new(starred.start(), comment.start()),
-        );
+        let tokenizer =
+            SimpleTokenizer::new(source, TextRange::new(starred.start(), comment.start()));
         if !tokenizer
             .skip_trivia()
             .any(|token| token.kind() == SimpleTokenKind::LParen)
@@ -1572,7 +1527,7 @@ fn handle_trailing_expression_starred_star_end_of_line_comment<'a>(
 /// ```
 fn handle_with_item_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(comment.enclosing_node().is_with_item());
 
@@ -1586,7 +1541,7 @@ fn handle_with_item_comment<'a>(
     let as_token = find_only_token_in_range(
         TextRange::new(context_expr.end(), optional_vars.start()),
         SimpleTokenKind::As,
-        locator.contents(),
+        source,
     );
 
     if comment.end() < as_token.start() {
@@ -1631,7 +1586,7 @@ fn handle_pattern_match_class_comment<'a>(
 /// ```
 fn handle_pattern_match_as_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     debug_assert!(comment.enclosing_node().is_pattern_match_as());
 
@@ -1639,7 +1594,7 @@ fn handle_pattern_match_as_comment<'a>(
         return CommentPlacement::Default(comment);
     };
 
-    let mut tokens = SimpleTokenizer::starts_at(pattern.end(), locator.contents())
+    let mut tokens = SimpleTokenizer::starts_at(pattern.end(), source)
         .skip_trivia()
         .skip_while(|token| token.kind == SimpleTokenKind::RParen);
 
@@ -1689,7 +1644,7 @@ fn handle_pattern_match_star_comment(comment: DecoratedComment) -> CommentPlacem
 fn handle_pattern_match_mapping_comment<'a>(
     comment: DecoratedComment<'a>,
     pattern: &'a ast::PatternMatchMapping,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     // The `**` has to come at the end, so there can't be another node after it. (The identifier,
     // like `rest` above, isn't a node.)
@@ -1713,11 +1668,8 @@ fn handle_pattern_match_mapping_comment<'a>(
         Some(preceding) => preceding.end(),
         None => comment.enclosing_node().start(),
     };
-    let mut tokens = SimpleTokenizer::new(
-        locator.contents(),
-        TextRange::new(preceding_end, comment.start()),
-    )
-    .skip_trivia();
+    let mut tokens =
+        SimpleTokenizer::new(source, TextRange::new(preceding_end, comment.start())).skip_trivia();
 
     // If the remaining tokens from the previous node include `**`, mark as a dangling comment.
     if tokens.any(|token| token.kind == SimpleTokenKind::DoubleStar) {
@@ -1746,9 +1698,9 @@ fn handle_pattern_match_mapping_comment<'a>(
 /// ```
 fn handle_named_expr_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
-    debug_assert!(comment.enclosing_node().is_expr_named_expr());
+    debug_assert!(comment.enclosing_node().is_expr_named());
 
     let (Some(target), Some(value)) = (comment.preceding_node(), comment.following_node()) else {
         return CommentPlacement::Default(comment);
@@ -1757,7 +1709,7 @@ fn handle_named_expr_comment<'a>(
     let colon_equal = find_only_token_in_range(
         TextRange::new(target.end(), value.start()),
         SimpleTokenKind::ColonEqual,
-        locator.contents(),
+        source,
     );
 
     if comment.end() < colon_equal.start() {
@@ -1802,7 +1754,7 @@ fn handle_named_expr_comment<'a>(
 fn handle_lambda_comment<'a>(
     comment: DecoratedComment<'a>,
     lambda: &'a ast::ExprLambda,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if let Some(parameters) = lambda.parameters.as_deref() {
         // Comments between the `lambda` and the parameters are dangling on the lambda:
@@ -1834,10 +1786,8 @@ fn handle_lambda_comment<'a>(
             //     )
             // )
             // ```
-            let tokenizer = SimpleTokenizer::new(
-                locator.contents(),
-                TextRange::new(parameters.end(), comment.start()),
-            );
+            let tokenizer =
+                SimpleTokenizer::new(source, TextRange::new(parameters.end(), comment.start()));
             if tokenizer
                 .skip_trivia()
                 .any(|token| token.kind == SimpleTokenKind::LParen)
@@ -1865,10 +1815,8 @@ fn handle_lambda_comment<'a>(
             //     )
             // )
             // ```
-            let tokenizer = SimpleTokenizer::new(
-                locator.contents(),
-                TextRange::new(lambda.start(), comment.start()),
-            );
+            let tokenizer =
+                SimpleTokenizer::new(source, TextRange::new(lambda.start(), comment.start()));
             if tokenizer
                 .skip_trivia()
                 .any(|token| token.kind == SimpleTokenKind::LParen)
@@ -1898,10 +1846,10 @@ fn handle_lambda_comment<'a>(
 fn handle_unary_op_comment<'a>(
     comment: DecoratedComment<'a>,
     unary_op: &'a ast::ExprUnaryOp,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let mut tokenizer = SimpleTokenizer::new(
-        locator.contents(),
+        source,
         TextRange::new(unary_op.start(), unary_op.operand.start()),
     )
     .skip_trivia();
@@ -1947,12 +1895,12 @@ fn handle_unary_op_comment<'a>(
 /// that it remains on the same line as open bracket.
 fn handle_bracketed_end_of_line_comment<'a>(
     comment: DecoratedComment<'a>,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     if comment.line_position().is_end_of_line() {
         // Ensure that there are no tokens between the open bracket and the comment.
         let mut lexer = SimpleTokenizer::new(
-            locator.contents(),
+            source,
             TextRange::new(comment.enclosing_node().start(), comment.start()),
         )
         .skip_trivia();
@@ -2070,7 +2018,7 @@ fn handle_with_comment<'a>(
 fn handle_comprehension_comment<'a>(
     comment: DecoratedComment<'a>,
     comprehension: &'a Comprehension,
-    locator: &Locator,
+    source: &str,
 ) -> CommentPlacement<'a> {
     let is_own_line = comment.line_position().is_own_line();
 
@@ -2095,7 +2043,7 @@ fn handle_comprehension_comment<'a>(
     let in_token = find_only_token_in_range(
         TextRange::new(comprehension.target.end(), comprehension.iter.start()),
         SimpleTokenKind::In,
-        locator.contents(),
+        source,
     );
 
     // Comments between the target and the `in`
@@ -2158,7 +2106,7 @@ fn handle_comprehension_comment<'a>(
         let if_token = find_only_token_in_range(
             TextRange::new(last_end, if_node.start()),
             SimpleTokenKind::If,
-            locator.contents(),
+            source,
         );
         if is_own_line {
             if last_end < comment.start() && comment.start() < if_token.start() {
@@ -2173,38 +2121,73 @@ fn handle_comprehension_comment<'a>(
     CommentPlacement::Default(comment)
 }
 
-/// Returns `true` if `right` is `Some` and `left` and `right` are referentially equal.
-fn are_same_optional<'a, T>(left: AnyNodeRef, right: Option<T>) -> bool
-where
-    T: Into<AnyNodeRef<'a>>,
-{
-    right.is_some_and(|right| left.ptr_eq(right.into()))
-}
-
-/// Returns `true` if `statement` is the first statement in an alternate `body` (e.g. the else of an if statement)
-fn is_first_statement_in_alternate_body(statement: AnyNodeRef, has_body: AnyNodeRef) -> bool {
-    match has_body {
-        AnyNodeRef::StmtFor(ast::StmtFor { orelse, .. })
-        | AnyNodeRef::StmtWhile(ast::StmtWhile { orelse, .. }) => {
-            are_same_optional(statement, orelse.first())
-        }
-
-        AnyNodeRef::StmtTry(ast::StmtTry {
-            handlers,
-            orelse,
-            finalbody,
-            ..
-        }) => {
-            are_same_optional(statement, handlers.first())
-                || are_same_optional(statement, orelse.first())
-                || are_same_optional(statement, finalbody.first())
-        }
-
-        AnyNodeRef::StmtIf(ast::StmtIf {
-            elif_else_clauses, ..
-        }) => are_same_optional(statement, elif_else_clauses.first()),
-        _ => false,
+/// Handle end-of-line comments for parenthesized implicitly concatenated strings when used in
+/// a `FormatStatementLastExpression` context:
+///
+/// ```python
+/// a = (
+///     "a"
+///     "b"
+///     "c"  # comment
+/// )
+/// ```
+///
+/// `# comment` is a trailing comment of the last part and not a trailing comment of the entire f-string.
+/// Associating the comment with the last part is important or the assignment formatting might move
+/// the comment at the end of the assignment, making it impossible to suppress an error for the last part.
+///
+/// On the other hand, `# comment` is a trailing end-of-line f-string comment for:
+///
+/// ```python
+/// a = (
+///     "a" "b" "c"  # comment
+/// )
+///
+/// a = (
+///     "a"
+///     "b"
+///     "c"
+/// )  # comment
+/// ```
+///
+/// Associating the comment with the f-string is desired in those cases because it allows
+/// joining the string literals into a single string literal if it fits on the line.
+fn handle_trailing_implicit_concatenated_string_comment<'a>(
+    comment: DecoratedComment<'a>,
+    comment_ranges: &CommentRanges,
+    source: &str,
+) -> CommentPlacement<'a> {
+    if !comment.line_position().is_end_of_line() {
+        return CommentPlacement::Default(comment);
     }
+
+    let Some(string_like) = comment
+        .preceding_node()
+        .and_then(|preceding| StringLike::try_from(preceding).ok())
+    else {
+        return CommentPlacement::Default(comment);
+    };
+
+    let mut parts = string_like.parts();
+
+    let (Some(last), Some(second_last)) = (parts.next_back(), parts.next_back()) else {
+        return CommentPlacement::Default(comment);
+    };
+
+    if source.contains_line_break(TextRange::new(second_last.end(), last.start()))
+        && is_expression_parenthesized(string_like.as_expression_ref(), comment_ranges, source)
+    {
+        let range = TextRange::new(last.end(), comment.start());
+
+        if !SimpleTokenizer::new(source, range)
+            .skip_trivia()
+            .any(|token| token.kind() == SimpleTokenKind::RParen)
+        {
+            return CommentPlacement::trailing(AnyNodeRef::from(last), comment);
+        }
+    }
+
+    CommentPlacement::Default(comment)
 }
 
 /// Returns `true` if the parameters are parenthesized (as in a function definition), or `false` if

@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Arguments, Expr};
 use ruff_text_size::Ranged;
 
@@ -43,18 +43,18 @@ use crate::checkers::ast::Checker;
 ///     if x < 0:
 ///         raise CantBeNegative(x)
 /// ```
-#[violation]
-pub struct RaiseVanillaArgs;
+#[derive(ViolationMetadata)]
+pub(crate) struct RaiseVanillaArgs;
 
 impl Violation for RaiseVanillaArgs {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Avoid specifying long messages outside the exception class")
+        "Avoid specifying long messages outside the exception class".to_string()
     }
 }
 
 /// TRY003
-pub(crate) fn raise_vanilla_args(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn raise_vanilla_args(checker: &Checker, expr: &Expr) {
     let Expr::Call(ast::ExprCall {
         func,
         arguments: Arguments { args, .. },
@@ -72,16 +72,13 @@ pub(crate) fn raise_vanilla_args(checker: &mut Checker, expr: &Expr) {
     // `NotImplementedError`.
     if checker
         .semantic()
-        .resolve_call_path(func)
-        .is_some_and(|call_path| matches!(call_path.as_slice(), ["", "NotImplementedError"]))
+        .match_builtin_expr(func, "NotImplementedError")
     {
         return;
     }
 
     if contains_message(arg) {
-        checker
-            .diagnostics
-            .push(Diagnostic::new(RaiseVanillaArgs, expr.range()));
+        checker.report_diagnostic(Diagnostic::new(RaiseVanillaArgs, expr.range()));
     }
 }
 
@@ -89,10 +86,21 @@ pub(crate) fn raise_vanilla_args(checker: &mut Checker, expr: &Expr) {
 /// some whitespace).
 fn contains_message(expr: &Expr) -> bool {
     match expr {
-        Expr::FString(ast::ExprFString { values, .. }) => {
-            for value in values {
-                if contains_message(value) {
-                    return true;
+        Expr::FString(ast::ExprFString { value, .. }) => {
+            for f_string_part in value {
+                match f_string_part {
+                    ast::FStringPart::Literal(literal) => {
+                        if literal.chars().any(char::is_whitespace) {
+                            return true;
+                        }
+                    }
+                    ast::FStringPart::FString(f_string) => {
+                        for literal in f_string.elements.literals() {
+                            if literal.chars().any(char::is_whitespace) {
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -1,8 +1,8 @@
-use ruff_python_ast::{self as ast, Expr, ParameterWithDefault};
+use ruff_python_ast::{self as ast, Expr};
 use rustc_hash::FxHashMap;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 use ruff_text_size::Ranged;
@@ -36,8 +36,8 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: The `for` statement](https://docs.python.org/3/reference/compound_stmts.html#the-for-statement)
-#[violation]
-pub struct LoopVariableOverridesIterator {
+#[derive(ViolationMetadata)]
+pub(crate) struct LoopVariableOverridesIterator {
     name: String,
 }
 
@@ -49,57 +49,8 @@ impl Violation for LoopVariableOverridesIterator {
     }
 }
 
-#[derive(Default)]
-struct NameFinder<'a> {
-    names: FxHashMap<&'a str, &'a Expr>,
-}
-
-impl<'a, 'b> Visitor<'b> for NameFinder<'a>
-where
-    'b: 'a,
-{
-    fn visit_expr(&mut self, expr: &'b Expr) {
-        match expr {
-            Expr::Name(ast::ExprName { id, .. }) => {
-                self.names.insert(id, expr);
-            }
-            Expr::ListComp(ast::ExprListComp { generators, .. })
-            | Expr::DictComp(ast::ExprDictComp { generators, .. })
-            | Expr::SetComp(ast::ExprSetComp { generators, .. })
-            | Expr::GeneratorExp(ast::ExprGeneratorExp { generators, .. }) => {
-                for comp in generators {
-                    self.visit_expr(&comp.iter);
-                }
-            }
-            Expr::Lambda(ast::ExprLambda {
-                parameters,
-                body,
-                range: _,
-            }) => {
-                visitor::walk_expr(self, body);
-
-                if let Some(parameters) = parameters {
-                    for ParameterWithDefault {
-                        parameter,
-                        default: _,
-                        range: _,
-                    } in parameters
-                        .posonlyargs
-                        .iter()
-                        .chain(&parameters.args)
-                        .chain(&parameters.kwonlyargs)
-                    {
-                        self.names.remove(parameter.name.as_str());
-                    }
-                }
-            }
-            _ => visitor::walk_expr(self, expr),
-        }
-    }
-}
-
 /// B020
-pub(crate) fn loop_variable_overrides_iterator(checker: &mut Checker, target: &Expr, iter: &Expr) {
+pub(crate) fn loop_variable_overrides_iterator(checker: &Checker, target: &Expr, iter: &Expr) {
     let target_names = {
         let mut target_finder = NameFinder::default();
         target_finder.visit_expr(target);
@@ -113,12 +64,49 @@ pub(crate) fn loop_variable_overrides_iterator(checker: &mut Checker, target: &E
 
     for (name, expr) in target_names {
         if iter_names.contains_key(name) {
-            checker.diagnostics.push(Diagnostic::new(
+            checker.report_diagnostic(Diagnostic::new(
                 LoopVariableOverridesIterator {
                     name: name.to_string(),
                 },
                 expr.range(),
             ));
+        }
+    }
+}
+
+#[derive(Default)]
+struct NameFinder<'a> {
+    names: FxHashMap<&'a str, &'a Expr>,
+}
+
+impl<'a> Visitor<'a> for NameFinder<'a> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Name(ast::ExprName { id, .. }) => {
+                self.names.insert(id, expr);
+            }
+            Expr::ListComp(ast::ExprListComp { generators, .. })
+            | Expr::DictComp(ast::ExprDictComp { generators, .. })
+            | Expr::SetComp(ast::ExprSetComp { generators, .. })
+            | Expr::Generator(ast::ExprGenerator { generators, .. }) => {
+                for comp in generators {
+                    self.visit_expr(&comp.iter);
+                }
+            }
+            Expr::Lambda(ast::ExprLambda {
+                parameters,
+                body,
+                range: _,
+            }) => {
+                visitor::walk_expr(self, body);
+
+                if let Some(parameters) = parameters {
+                    for parameter in parameters.iter_non_variadic_params() {
+                        self.names.remove(parameter.name().as_str());
+                    }
+                }
+            }
+            _ => visitor::walk_expr(self, expr),
         }
     }
 }

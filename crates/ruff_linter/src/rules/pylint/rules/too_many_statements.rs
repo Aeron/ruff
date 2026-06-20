@@ -1,14 +1,14 @@
 use ruff_python_ast::{self as ast, ExceptHandler, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::identifier::Identifier;
 
 /// ## What it does
 /// Checks for functions or methods with too many statements.
 ///
 /// By default, this rule allows up to 50 statements, as configured by the
-/// [`pylint.max-statements`] option.
+/// [`lint.pylint.max-statements`] option.
 ///
 /// ## Why is this bad?
 /// Functions or methods with many statements are harder to understand
@@ -44,9 +44,9 @@ use ruff_python_ast::identifier::Identifier;
 /// ```
 ///
 /// ## Options
-/// - `pylint.max-statements`
-#[violation]
-pub struct TooManyStatements {
+/// - `lint.pylint.max-statements`
+#[derive(ViolationMetadata)]
+pub(crate) struct TooManyStatements {
     statements: usize,
     max_statements: usize,
 }
@@ -90,6 +90,7 @@ fn num_statements(stmts: &[Stmt]) -> usize {
             Stmt::Match(ast::StmtMatch { cases, .. }) => {
                 count += 1;
                 for case in cases {
+                    count += 1;
                     count += num_statements(&case.body);
                 }
             }
@@ -157,9 +158,15 @@ pub(crate) fn too_many_statements(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use ruff_python_parser::parse_suite;
+
+    use ruff_python_ast::Suite;
+    use ruff_python_parser::parse_module;
 
     use super::num_statements;
+
+    fn parse_suite(source: &str) -> Result<Suite> {
+        Ok(parse_module(source)?.into_suite())
+    }
 
     #[test]
     fn pass() -> Result<()> {
@@ -167,7 +174,7 @@ mod tests {
 def f():
     pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 2);
         Ok(())
     }
@@ -181,7 +188,7 @@ def f():
     else:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 5);
         Ok(())
     }
@@ -196,7 +203,7 @@ def f():
         if a:
             print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 6);
         Ok(())
     }
@@ -210,7 +217,7 @@ def f():
     elif a:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 5);
         Ok(())
     }
@@ -228,8 +235,23 @@ def f():
     else:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn match_case() -> Result<()> {
+        let source: &str = r"
+def f():
+    match x:
+        case 3:
+            pass
+        case _:
+            pass
+";
+        let stmts = parse_suite(source)?;
+        assert_eq!(num_statements(&stmts), 6);
         Ok(())
     }
 
@@ -257,7 +279,7 @@ async def f():
             import time
             pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 19);
         Ok(())
     }
@@ -269,7 +291,7 @@ def f():
     for i in range(10):
         pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 2);
         Ok(())
     }
@@ -283,7 +305,7 @@ def f():
     else:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 3);
         Ok(())
     }
@@ -298,7 +320,7 @@ def f():
 
     print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 5);
         Ok(())
     }
@@ -316,7 +338,7 @@ def f():
 
     print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 3);
         Ok(())
     }
@@ -327,7 +349,7 @@ def f():
 def f():
     return
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 1);
         Ok(())
     }
@@ -343,7 +365,7 @@ def f():
             print()
 
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 6);
         Ok(())
     }
@@ -357,7 +379,7 @@ def f():
     except Exception:
         raise
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 5);
         Ok(())
     }
@@ -373,7 +395,7 @@ def f():
     else:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 7);
         Ok(())
     }
@@ -391,7 +413,7 @@ def f():
     finally:
         pass
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 10);
         Ok(())
     }
@@ -407,7 +429,7 @@ def f():
     except Exception:
         raise
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 8);
         Ok(())
     }
@@ -425,7 +447,7 @@ def f():
     finally:
         print()
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 11);
         Ok(())
     }
@@ -437,7 +459,7 @@ def f():
     for i in range(10):
         yield i
 ";
-        let stmts = parse_suite(source, "<filename>")?;
+        let stmts = parse_suite(source)?;
         assert_eq!(num_statements(&stmts), 2);
         Ok(())
     }

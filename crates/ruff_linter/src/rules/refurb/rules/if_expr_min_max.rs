@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::{self as ast, CmpOp, Expr};
 use ruff_text_size::Ranged;
@@ -30,8 +30,8 @@ use crate::fix::snippet::SourceCodeSnippet;
 /// ## References
 /// - [Python documentation: `min`](https://docs.python.org/3.11/library/functions.html#min)
 /// - [Python documentation: `max`](https://docs.python.org/3.11/library/functions.html#max)
-#[violation]
-pub struct IfExprMinMax {
+#[derive(ViolationMetadata)]
+pub(crate) struct IfExprMinMax {
     min_max: MinMax,
     expression: SourceCodeSnippet,
     replacement: SourceCodeSnippet,
@@ -76,7 +76,7 @@ impl Violation for IfExprMinMax {
 }
 
 /// FURB136
-pub(crate) fn if_expr_min_max(checker: &mut Checker, if_exp: &ast::ExprIfExp) {
+pub(crate) fn if_expr_min_max(checker: &Checker, if_exp: &ast::ExprIf) {
     let Expr::Compare(ast::ExprCompare {
         left,
         ops,
@@ -88,7 +88,7 @@ pub(crate) fn if_expr_min_max(checker: &mut Checker, if_exp: &ast::ExprIfExp) {
     };
 
     // Ignore, e.g., `foo < bar < baz`.
-    let [op] = ops.as_slice() else {
+    let [op] = &**ops else {
         return;
     };
 
@@ -102,7 +102,7 @@ pub(crate) fn if_expr_min_max(checker: &mut Checker, if_exp: &ast::ExprIfExp) {
         _ => return,
     };
 
-    let [right] = comparators.as_slice() else {
+    let [right] = &**comparators else {
         return;
     };
 
@@ -139,14 +139,14 @@ pub(crate) fn if_expr_min_max(checker: &mut Checker, if_exp: &ast::ExprIfExp) {
         if_exp.range(),
     );
 
-    if checker.semantic().is_builtin(min_max.as_str()) {
+    if checker.semantic().has_builtin_binding(min_max.as_str()) {
         diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
             replacement,
             if_exp.range(),
         )));
     }
 
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -156,14 +156,16 @@ enum MinMax {
 }
 
 impl MinMax {
-    fn reverse(self) -> Self {
+    #[must_use]
+    const fn reverse(self) -> Self {
         match self {
             Self::Min => Self::Max,
             Self::Max => Self::Min,
         }
     }
 
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Min => "min",
             Self::Max => "max",

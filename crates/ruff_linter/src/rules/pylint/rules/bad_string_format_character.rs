@@ -1,16 +1,14 @@
 use std::str::FromStr;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::str::{leading_quote, trailing_quote};
-use ruff_python_ast::Expr;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{Expr, ExprStringLiteral, StringFlags, StringLiteral};
 use ruff_python_literal::{
     cformat::{CFormatErrorType, CFormatString},
     format::FormatPart,
     format::FromTemplate,
     format::{FormatSpec, FormatSpecError, FormatString},
 };
-use ruff_python_parser::{lexer, Mode};
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -28,8 +26,8 @@ use crate::checkers::ast::Checker;
 ///
 /// print("{:z}".format("1"))
 /// ```
-#[violation]
-pub struct BadStringFormatCharacter {
+#[derive(ViolationMetadata)]
+pub(crate) struct BadStringFormatCharacter {
     format_char: char,
 }
 
@@ -43,7 +41,7 @@ impl Violation for BadStringFormatCharacter {
 
 /// PLE1300
 /// Ex) `"{:z}".format("1")`
-pub(crate) fn call(checker: &mut Checker, string: &str, range: TextRange) {
+pub(crate) fn call(checker: &Checker, string: &str, range: TextRange) {
     if let Ok(format_string) = FormatString::from_str(string) {
         for part in &format_string.format_parts {
             let FormatPart::Field { format_spec, .. } = part else {
@@ -52,7 +50,7 @@ pub(crate) fn call(checker: &mut Checker, string: &str, range: TextRange) {
 
             match FormatSpec::parse(format_spec) {
                 Err(FormatSpecError::InvalidFormatType) => {
-                    checker.diagnostics.push(Diagnostic::new(
+                    checker.report_diagnostic(Diagnostic::new(
                         BadStringFormatCharacter {
                             // The format type character is always the last one.
                             // More info in the official spec:
@@ -72,7 +70,7 @@ pub(crate) fn call(checker: &mut Checker, string: &str, range: TextRange) {
                         if let Err(FormatSpecError::InvalidFormatType) =
                             FormatSpec::parse(&format_spec)
                         {
-                            checker.diagnostics.push(Diagnostic::new(
+                            checker.report_diagnostic(Diagnostic::new(
                                 BadStringFormatCharacter {
                                     // The format type character is always the last one.
                                     // More info in the official spec:
@@ -91,36 +89,21 @@ pub(crate) fn call(checker: &mut Checker, string: &str, range: TextRange) {
 
 /// PLE1300
 /// Ex) `"%z" % "1"`
-pub(crate) fn percent(checker: &mut Checker, expr: &Expr) {
-    // Grab each string segment (in case there's an implicit concatenation).
-    let mut strings: Vec<TextRange> = vec![];
-    for (tok, range) in
-        lexer::lex_starts_at(checker.locator().slice(expr), Mode::Module, expr.start()).flatten()
+pub(crate) fn percent(checker: &Checker, expr: &Expr, format_string: &ExprStringLiteral) {
+    for StringLiteral {
+        value: _,
+        range,
+        flags,
+    } in &format_string.value
     {
-        if tok.is_string() {
-            strings.push(range);
-        } else if tok.is_percent() {
-            // Break as soon as we find the modulo symbol.
-            break;
-        }
-    }
-
-    // If there are no string segments, abort.
-    if strings.is_empty() {
-        return;
-    }
-
-    for range in &strings {
-        let string = checker.locator().slice(*range);
-        let (Some(leader), Some(trailer)) = (leading_quote(string), trailing_quote(string)) else {
-            return;
-        };
-        let string = &string[leader.len()..string.len() - trailer.len()];
+        let string = checker.locator().slice(range);
+        let string = &string
+            [usize::from(flags.opener_len())..(string.len() - usize::from(flags.closer_len()))];
 
         // Parse the format string (e.g. `"%s"`) into a list of `PercentFormat`.
         if let Err(format_error) = CFormatString::from_str(string) {
             if let CFormatErrorType::UnsupportedFormatChar(format_char) = format_error.typ {
-                checker.diagnostics.push(Diagnostic::new(
+                checker.report_diagnostic(Diagnostic::new(
                     BadStringFormatCharacter { format_char },
                     expr.range(),
                 ));

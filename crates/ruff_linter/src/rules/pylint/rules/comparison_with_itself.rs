@@ -2,12 +2,11 @@ use itertools::Itertools;
 
 use crate::fix::snippet::SourceCodeSnippet;
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{CmpOp, Expr};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
-use crate::rules::pylint::helpers::CmpOpExt;
 
 /// ## What it does
 /// Checks for operations that compare a name to itself.
@@ -21,34 +20,41 @@ use crate::rules::pylint::helpers::CmpOpExt;
 /// foo == foo
 /// ```
 ///
+/// In some cases, self-comparisons are used to determine whether a float is
+/// NaN. Instead, prefer `math.isnan`:
+/// ```python
+/// import math
+///
+/// math.isnan(foo)
+/// ```
+///
 /// ## References
 /// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
-#[violation]
-pub struct ComparisonWithItself {
+#[derive(ViolationMetadata)]
+pub(crate) struct ComparisonWithItself {
     actual: SourceCodeSnippet,
 }
 
 impl Violation for ComparisonWithItself {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let ComparisonWithItself { actual } = self;
-        if let Some(actual) = actual.full_display() {
+        if let Some(actual) = self.actual.full_display() {
             format!("Name compared with itself, consider replacing `{actual}`")
         } else {
-            format!("Name compared with itself")
+            "Name compared with itself".to_string()
         }
     }
 }
 
 /// PLR0124
 pub(crate) fn comparison_with_itself(
-    checker: &mut Checker,
+    checker: &Checker,
     left: &Expr,
     ops: &[CmpOp],
     comparators: &[Expr],
 ) {
     for ((left, right), op) in std::iter::once(left)
-        .chain(comparators.iter())
+        .chain(comparators)
         .tuple_windows()
         .zip(ops)
     {
@@ -58,10 +64,10 @@ pub(crate) fn comparison_with_itself(
                 let actual = format!(
                     "{} {} {}",
                     checker.locator().slice(left),
-                    CmpOpExt::from(op),
+                    op,
                     checker.locator().slice(right)
                 );
-                checker.diagnostics.push(Diagnostic::new(
+                checker.report_diagnostic(Diagnostic::new(
                     ComparisonWithItself {
                         actual: SourceCodeSnippet::new(actual),
                     },
@@ -76,10 +82,10 @@ pub(crate) fn comparison_with_itself(
                 {
                     continue;
                 }
-                let [Expr::Name(left_arg)] = left_call.arguments.args.as_slice() else {
+                let [Expr::Name(left_arg)] = &*left_call.arguments.args else {
                     continue;
                 };
-                let [Expr::Name(right_right)] = right_call.arguments.args.as_slice() else {
+                let [Expr::Name(right_right)] = &*right_call.arguments.args else {
                     continue;
                 };
                 if left_arg.id != right_right.id {
@@ -87,29 +93,29 @@ pub(crate) fn comparison_with_itself(
                 }
 
                 // Both calls must be to the same function.
-                let Expr::Name(left_func) = left_call.func.as_ref() else {
+                let semantic = checker.semantic();
+                let Some(left_name) = semantic.resolve_builtin_symbol(&left_call.func) else {
                     continue;
                 };
-                let Expr::Name(right_func) = right_call.func.as_ref() else {
+                let Some(right_name) = semantic.resolve_builtin_symbol(&right_call.func) else {
                     continue;
                 };
-                if left_func.id != right_func.id {
+                if left_name != right_name {
                     continue;
                 }
 
                 // The call must be to pure function, like `id`.
                 if matches!(
-                    left_func.id.as_str(),
+                    left_name,
                     "id" | "len" | "type" | "int" | "bool" | "str" | "repr" | "bytes"
-                ) && checker.semantic().is_builtin(&left_func.id)
-                {
+                ) {
                     let actual = format!(
                         "{} {} {}",
                         checker.locator().slice(left),
-                        CmpOpExt::from(op),
+                        op,
                         checker.locator().slice(right)
                     );
-                    checker.diagnostics.push(Diagnostic::new(
+                    checker.report_diagnostic(Diagnostic::new(
                         ComparisonWithItself {
                             actual: SourceCodeSnippet::new(actual),
                         },

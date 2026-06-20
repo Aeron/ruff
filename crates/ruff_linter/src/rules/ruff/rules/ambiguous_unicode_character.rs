@@ -3,14 +3,16 @@ use std::fmt;
 use bitflags::bitflags;
 
 use ruff_diagnostics::{Diagnostic, DiagnosticKind, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_source_file::Locator;
-use ruff_text_size::{TextLen, TextRange, TextSize};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
+use ruff_python_ast::{self as ast, StringLike};
+use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 
+use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 use crate::rules::ruff::rules::confusables::confusable;
 use crate::rules::ruff::rules::Context;
 use crate::settings::LinterSettings;
+use crate::Locator;
 
 /// ## What it does
 /// Checks for ambiguous Unicode characters in strings.
@@ -28,7 +30,7 @@ use crate::settings::LinterSettings;
 /// spec recommends `GREEK CAPITAL LETTER OMEGA` over `OHM SIGN`.
 ///
 /// You can omit characters from being flagged as ambiguous via the
-/// [`allowed-confusables`] setting.
+/// [`lint.allowed-confusables`] setting.
 ///
 /// ## Example
 /// ```python
@@ -41,11 +43,11 @@ use crate::settings::LinterSettings;
 /// ```
 ///
 /// ## Options
-/// - `allowed-confusables`
+/// - `lint.allowed-confusables`
 ///
 /// [preview]: https://docs.astral.sh/ruff/preview/
-#[violation]
-pub struct AmbiguousUnicodeCharacterString {
+#[derive(ViolationMetadata)]
+pub(crate) struct AmbiguousUnicodeCharacterString {
     confusable: char,
     representant: char,
 }
@@ -81,7 +83,7 @@ impl Violation for AmbiguousUnicodeCharacterString {
 /// spec recommends `GREEK CAPITAL LETTER OMEGA` over `OHM SIGN`.
 ///
 /// You can omit characters from being flagged as ambiguous via the
-/// [`allowed-confusables`] setting.
+/// [`lint.allowed-confusables`] setting.
 ///
 /// ## Example
 /// ```python
@@ -94,11 +96,11 @@ impl Violation for AmbiguousUnicodeCharacterString {
 /// ```
 ///
 /// ## Options
-/// - `allowed-confusables`
+/// - `lint.allowed-confusables`
 ///
 /// [preview]: https://docs.astral.sh/ruff/preview/
-#[violation]
-pub struct AmbiguousUnicodeCharacterDocstring {
+#[derive(ViolationMetadata)]
+pub(crate) struct AmbiguousUnicodeCharacterDocstring {
     confusable: char,
     representant: char,
 }
@@ -134,7 +136,7 @@ impl Violation for AmbiguousUnicodeCharacterDocstring {
 /// spec recommends `GREEK CAPITAL LETTER OMEGA` over `OHM SIGN`.
 ///
 /// You can omit characters from being flagged as ambiguous via the
-/// [`allowed-confusables`] setting.
+/// [`lint.allowed-confusables`] setting.
 ///
 /// ## Example
 /// ```python
@@ -147,11 +149,11 @@ impl Violation for AmbiguousUnicodeCharacterDocstring {
 /// ```
 ///
 /// ## Options
-/// - `allowed-confusables`
+/// - `lint.allowed-confusables`
 ///
 /// [preview]: https://docs.astral.sh/ruff/preview/
-#[violation]
-pub struct AmbiguousUnicodeCharacterComment {
+#[derive(ViolationMetadata)]
+pub(crate) struct AmbiguousUnicodeCharacterComment {
     confusable: char,
     representant: char,
 }
@@ -171,16 +173,71 @@ impl Violation for AmbiguousUnicodeCharacterComment {
     }
 }
 
-/// RUF001, RUF002, RUF003
-pub(crate) fn ambiguous_unicode_character(
+/// RUF003
+pub(crate) fn ambiguous_unicode_character_comment(
     diagnostics: &mut Vec<Diagnostic>,
     locator: &Locator,
+    range: TextRange,
+    settings: &LinterSettings,
+) {
+    let text = locator.slice(range);
+    ambiguous_unicode_character(diagnostics, text, range, Context::Comment, settings);
+}
+
+/// RUF001, RUF002
+pub(crate) fn ambiguous_unicode_character_string(checker: &Checker, string_like: StringLike) {
+    let semantic = checker.semantic();
+
+    if semantic.in_string_type_definition() {
+        return;
+    }
+
+    let context = if semantic.in_pep_257_docstring() {
+        Context::Docstring
+    } else {
+        Context::String
+    };
+
+    for part in string_like.parts() {
+        match part {
+            ast::StringLikePart::String(string_literal) => {
+                let text = checker.locator().slice(string_literal);
+                let mut diagnostics = Vec::new();
+                ambiguous_unicode_character(
+                    &mut diagnostics,
+                    text,
+                    string_literal.range(),
+                    context,
+                    checker.settings,
+                );
+                checker.report_diagnostics(diagnostics);
+            }
+            ast::StringLikePart::Bytes(_) => {}
+            ast::StringLikePart::FString(f_string) => {
+                for literal in f_string.elements.literals() {
+                    let text = checker.locator().slice(literal);
+                    let mut diagnostics = Vec::new();
+                    ambiguous_unicode_character(
+                        &mut diagnostics,
+                        text,
+                        literal.range(),
+                        context,
+                        checker.settings,
+                    );
+                    checker.report_diagnostics(diagnostics);
+                }
+            }
+        }
+    }
+}
+
+fn ambiguous_unicode_character(
+    diagnostics: &mut Vec<Diagnostic>,
+    text: &str,
     range: TextRange,
     context: Context,
     settings: &LinterSettings,
 ) {
-    let text = locator.slice(range);
-
     // Most of the time, we don't need to check for ambiguous unicode characters at all.
     if text.is_ascii() {
         return;
@@ -255,9 +312,9 @@ bitflags! {
     #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
     pub struct WordFlags: u8 {
         /// The word contains at least one ASCII character (like `B`).
-        const ASCII = 0b0000_0001;
+        const ASCII = 1 << 0;
         /// The word contains at least one unambiguous unicode character (like `β`).
-        const UNAMBIGUOUS_UNICODE = 0b0000_0010;
+        const UNAMBIGUOUS_UNICODE = 1 << 1;
     }
 }
 

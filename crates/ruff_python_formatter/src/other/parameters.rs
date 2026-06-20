@@ -1,14 +1,11 @@
-use std::usize;
-
 use ruff_formatter::{format_args, write, FormatRuleWithOptions};
-use ruff_python_ast::Parameters;
-use ruff_python_ast::{AnyNodeRef, AstNode};
-use ruff_python_trivia::{SimpleToken, SimpleTokenKind, SimpleTokenizer};
+use ruff_python_ast::{AnyNodeRef, Parameters};
+use ruff_python_trivia::{CommentLinePosition, SimpleToken, SimpleTokenKind, SimpleTokenizer};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::comments::{
     dangling_comments, dangling_open_parenthesis_comments, leading_comments, leading_node_comments,
-    trailing_comments, CommentLinePosition, SourceComment,
+    trailing_comments, SourceComment,
 };
 use crate::context::{NodeLevel, WithNodeLevel};
 use crate::expression::parentheses::empty_parenthesized;
@@ -167,7 +164,7 @@ impl FormatNodeRule<Parameters> for FormatParameters {
                     token("*"),
                     vararg.format()
                 ]);
-                last_node = Some(vararg.as_any_node_ref());
+                last_node = Some(vararg.as_ref().into());
             } else if !kwonlyargs.is_empty() {
                 // Given very strange comment placement, comments here may not actually have been
                 // marked as `StarLeading`/`StarTrailing`, but that's fine since we still produce
@@ -203,7 +200,7 @@ impl FormatNodeRule<Parameters> for FormatParameters {
                     token("**"),
                     kwarg.format()
                 ]);
-                last_node = Some(kwarg.as_any_node_ref());
+                last_node = Some(kwarg.as_ref().into());
             }
 
             joiner.finish()?;
@@ -240,11 +237,7 @@ impl FormatNodeRule<Parameters> for FormatParameters {
             Ok(())
         });
 
-        let num_parameters = posonlyargs.len()
-            + args.len()
-            + usize::from(vararg.is_some())
-            + kwonlyargs.len()
-            + usize::from(kwarg.is_some());
+        let num_parameters = item.len();
 
         if self.parentheses == ParametersParentheses::Never {
             write!(f, [group(&format_inner), dangling_comments(dangling)])
@@ -252,6 +245,19 @@ impl FormatNodeRule<Parameters> for FormatParameters {
             let mut f = WithNodeLevel::new(NodeLevel::ParenthesizedExpression, f);
             // No parameters, format any dangling comments between `()`
             write!(f, [empty_parenthesized("(", dangling, ")")])
+        } else if num_parameters == 1 && posonlyargs.is_empty() && kwonlyargs.is_empty() {
+            // If we have a single argument, avoid the inner group, to ensure that we insert a
+            // trailing comma if the outer group breaks.
+            let mut f = WithNodeLevel::new(NodeLevel::ParenthesizedExpression, f);
+            write!(
+                f,
+                [
+                    token("("),
+                    dangling_open_parenthesis_comments(parenthesis_dangling),
+                    soft_block_indent(&format_inner),
+                    token(")")
+                ]
+            )
         } else {
             // Intentionally avoid `parenthesized`, which groups the entire formatted contents.
             // We want parameters to be grouped alongside return types, one level up, so we
@@ -267,15 +273,6 @@ impl FormatNodeRule<Parameters> for FormatParameters {
                 ]
             )
         }
-    }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Handled in `fmt_fields`
-        Ok(())
     }
 }
 
@@ -437,6 +434,7 @@ pub(crate) fn find_parameter_separators(
     // * `f(a, /, b)`
     // * `f(a, /, *b)`
     // * `f(a, /, *, b)`
+    // * `f(a, /, *, **b)`
     // * `f(a, /)`
     let slash_following_start = parameters
         .args
@@ -444,6 +442,7 @@ pub(crate) fn find_parameter_separators(
         .map(Ranged::start)
         .or(parameters.vararg.as_ref().map(|first| first.start()))
         .or(star.as_ref().map(|star| star.separator.start()))
+        .or(parameters.kwarg.as_deref().map(Ranged::start))
         .unwrap_or(parameters.end());
     let slash = slash.map(|(preceding_end, slash)| ParameterSeparator {
         preceding_end,

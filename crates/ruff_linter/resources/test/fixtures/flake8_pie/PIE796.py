@@ -64,3 +64,17 @@ class FakeEnum10(enum.Enum):
     A = enum.auto()
     B = enum.auto()
     C = enum.auto()
+
+
+class FakeEnum10(enum.Enum):
+    A = ...
+    B = ...  # PIE796
+    C = ...  # PIE796
+
+
+from typing import cast
+
+class FakeEnum11(enum.Enum):
+    A = cast(SomeType, ...)
+    B = cast(SomeType, ...)  # PIE796
+    C = cast(SomeType, ...)  # PIE796

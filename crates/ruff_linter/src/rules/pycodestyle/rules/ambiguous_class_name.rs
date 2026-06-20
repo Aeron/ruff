@@ -1,7 +1,7 @@
 use ruff_python_ast::Identifier;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::rules::pycodestyle::helpers::is_ambiguous_name;
@@ -14,18 +14,18 @@ use crate::rules::pycodestyle::helpers::is_ambiguous_name;
 /// numerals one and zero. When tempted to use 'l', use 'L' instead.
 ///
 /// ## Example
+///
 /// ```python
-/// class I(object):
-///     ...
+/// class I(object): ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
-/// class Integer(object):
-///     ...
+/// class Integer(object): ...
 /// ```
-#[violation]
-pub struct AmbiguousClassName(pub String);
+#[derive(ViolationMetadata)]
+pub(crate) struct AmbiguousClassName(pub String);
 
 impl Violation for AmbiguousClassName {
     #[derive_message_formats]

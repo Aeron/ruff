@@ -74,6 +74,15 @@ Each fuzzer harness in [`fuzz_targets`](fuzz_targets) targets a different aspect
 them in different ways. While there is implementation-specific documentation in the source code
 itself, each harness is briefly described below.
 
+### `red_knot_check_invalid_syntax`
+
+This fuzz harness checks that the type checker (Red Knot) does not panic when checking a source
+file with invalid syntax. This rejects any corpus entries that is already valid Python code.
+Currently, this is limited to syntax errors that's produced by Ruff's Python parser which means
+that it does not cover all possible syntax errors (<https://github.com/astral-sh/ruff/issues/11934>).
+A possible workaround for now would be to bypass the parser and run the type checker on all inputs
+regardless of syntax errors.
+
 ### `ruff_parse_simple`
 
 This fuzz harness does not perform any "smart" testing of Ruff; it merely checks that the parsing
@@ -101,3 +110,16 @@ This fuzz harness checks that fixes applied by Ruff do not introduce new errors 
 [`ruff_linter::test::test_snippet`](../crates/ruff_linter/src/test.rs) testing utility.
 It currently is only configured to use default settings, but may be extended in future versions to
 test non-default linter settings.
+
+### `ruff_formatter_idempotency`
+
+This fuzz harness ensures that the formatter is [idempotent](https://en.wikipedia.org/wiki/Idempotence)
+which detects possible unsteady states of Ruff's formatter.
+
+### `ruff_formatter_validity`
+
+This fuzz harness checks that Ruff's formatter does not introduce new linter errors/warnings by
+linting once, counting the number of each error type, then formatting, then linting again and
+ensuring that the number of each error type does not increase across formats. This has the
+beneficial side effect of discovering cases where the linter does not discover a lint error when
+it should have due to a formatting inconsistency.

@@ -1,12 +1,15 @@
 use log::debug;
 
-use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_diagnostics::{Applicability, Diagnostic, Edit, Fix, FixAvailability, Violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::helpers::is_dunder;
+use ruff_python_ast::name::Name;
 use ruff_python_ast::{self as ast, Arguments, Expr, ExprContext, Identifier, Keyword, Stmt};
 use ruff_python_codegen::Generator;
 use ruff_python_semantic::SemanticModel;
 use ruff_python_stdlib::identifiers::is_identifier;
+use ruff_python_trivia::CommentRanges;
+use ruff_source_file::LineRanges;
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -39,10 +42,15 @@ use crate::checkers::ast::Checker;
 ///     b: str
 /// ```
 ///
+/// ## Fix safety
+/// This rule's fix is marked as unsafe if there are any comments within the
+/// range of the `NamedTuple` definition, as these will be dropped by the
+/// autofix.
+///
 /// ## References
 /// - [Python documentation: `typing.NamedTuple`](https://docs.python.org/3/library/typing.html#typing.NamedTuple)
-#[violation]
-pub struct ConvertNamedTupleFunctionalToClass {
+#[derive(ViolationMetadata)]
+pub(crate) struct ConvertNamedTupleFunctionalToClass {
     name: String,
 }
 
@@ -64,7 +72,7 @@ impl Violation for ConvertNamedTupleFunctionalToClass {
 
 /// UP014
 pub(crate) fn convert_named_tuple_functional_to_class(
-    checker: &mut Checker,
+    checker: &Checker,
     stmt: &Stmt,
     targets: &[Expr],
     value: &Expr,
@@ -119,9 +127,10 @@ pub(crate) fn convert_named_tuple_functional_to_class(
             fields,
             base_class,
             checker.generator(),
+            checker.comment_ranges(),
         ));
     }
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 /// Return the typename, args, keywords, and base class.
@@ -148,11 +157,11 @@ fn match_named_tuple_assign<'a>(
 }
 
 /// Generate a [`Stmt::AnnAssign`] representing the provided field definition.
-fn create_field_assignment_stmt(field: &str, annotation: &Expr) -> Stmt {
+fn create_field_assignment_stmt(field: Name, annotation: &Expr) -> Stmt {
     ast::StmtAnnAssign {
         target: Box::new(
             ast::ExprName {
-                id: field.into(),
+                id: field,
                 ctx: ExprContext::Load,
                 range: TextRange::default(),
             }
@@ -168,14 +177,15 @@ fn create_field_assignment_stmt(field: &str, annotation: &Expr) -> Stmt {
 
 /// Create a list of field assignments from the `NamedTuple` fields argument.
 fn create_fields_from_fields_arg(fields: &Expr) -> Option<Vec<Stmt>> {
-    let ast::ExprList { elts, .. } = fields.as_list_expr()?;
-    if elts.is_empty() {
+    let fields = fields.as_list_expr()?;
+    if fields.is_empty() {
         let node = Stmt::Pass(ast::StmtPass {
             range: TextRange::default(),
         });
         Some(vec![node])
     } else {
-        elts.iter()
+        fields
+            .iter()
             .map(|field| {
                 let ast::ExprTuple { elts, .. } = field.as_tuple_expr()?;
                 let [field, annotation] = elts.as_slice() else {
@@ -185,13 +195,16 @@ fn create_fields_from_fields_arg(fields: &Expr) -> Option<Vec<Stmt>> {
                     return None;
                 }
                 let ast::ExprStringLiteral { value: field, .. } = field.as_string_literal_expr()?;
-                if !is_identifier(field) {
+                if !is_identifier(field.to_str()) {
                     return None;
                 }
-                if is_dunder(field) {
+                if is_dunder(field.to_str()) {
                     return None;
                 }
-                Some(create_field_assignment_stmt(field, annotation))
+                Some(create_field_assignment_stmt(
+                    Name::new(field.to_str()),
+                    annotation,
+                ))
             })
             .collect()
     }
@@ -205,7 +218,7 @@ fn create_fields_from_keywords(keywords: &[Keyword]) -> Option<Vec<Stmt>> {
             keyword
                 .arg
                 .as_ref()
-                .map(|field| create_field_assignment_stmt(field.as_str(), &keyword.value))
+                .map(|field| create_field_assignment_stmt(field.id.clone(), &keyword.value))
         })
         .collect()
 }
@@ -216,8 +229,8 @@ fn create_class_def_stmt(typename: &str, body: Vec<Stmt>, base_class: &Expr) -> 
     ast::StmtClassDef {
         name: Identifier::new(typename.to_string(), TextRange::default()),
         arguments: Some(Box::new(Arguments {
-            args: vec![base_class.clone()],
-            keywords: vec![],
+            args: Box::from([base_class.clone()]),
+            keywords: Box::from([]),
             range: TextRange::default(),
         })),
         body,
@@ -235,9 +248,17 @@ fn convert_to_class(
     body: Vec<Stmt>,
     base_class: &Expr,
     generator: Generator,
+    comment_ranges: &CommentRanges,
 ) -> Fix {
-    Fix::safe_edit(Edit::range_replacement(
-        generator.stmt(&create_class_def_stmt(typename, body, base_class)),
-        stmt.range(),
-    ))
+    Fix::applicable_edit(
+        Edit::range_replacement(
+            generator.stmt(&create_class_def_stmt(typename, body, base_class)),
+            stmt.range(),
+        ),
+        if comment_ranges.intersects(stmt.range()) {
+            Applicability::Unsafe
+        } else {
+            Applicability::Safe
+        },
+    )
 }

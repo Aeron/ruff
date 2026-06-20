@@ -1,5 +1,5 @@
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_semantic::Scope;
 use ruff_text_size::Ranged;
 
@@ -19,9 +19,9 @@ use crate::checkers::ast::Checker;
 /// ```
 ///
 /// ## References
-/// - [PEP 484](https://peps.python.org/pep-0484/)
-#[violation]
-pub struct UnusedAnnotation {
+/// - [PEP 484 – Type Hints](https://peps.python.org/pep-0484/)
+#[derive(ViolationMetadata)]
+pub(crate) struct UnusedAnnotation {
     name: String,
 }
 
@@ -34,15 +34,11 @@ impl Violation for UnusedAnnotation {
 }
 
 /// F842
-pub(crate) fn unused_annotation(
-    checker: &Checker,
-    scope: &Scope,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+pub(crate) fn unused_annotation(checker: &Checker, scope: &Scope) {
     for (name, range) in scope.bindings().filter_map(|(name, binding_id)| {
         let binding = checker.semantic().binding(binding_id);
         if binding.kind.is_annotation()
-            && !binding.is_used()
+            && binding.is_unused()
             && !checker.settings.dummy_variable_rgx.is_match(name)
         {
             Some((name.to_string(), binding.range()))
@@ -50,6 +46,6 @@ pub(crate) fn unused_annotation(
             None
         }
     }) {
-        diagnostics.push(Diagnostic::new(UnusedAnnotation { name }, range));
+        checker.report_diagnostic(Diagnostic::new(UnusedAnnotation { name }, range));
     }
 }

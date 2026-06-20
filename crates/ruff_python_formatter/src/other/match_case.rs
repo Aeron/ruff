@@ -1,15 +1,26 @@
-use ruff_formatter::write;
-use ruff_python_ast::AstNode;
+use ruff_formatter::{format_args, write, FormatRuleWithOptions};
 use ruff_python_ast::MatchCase;
 
-use crate::builders::parenthesize_if_expands;
-use crate::comments::SourceComment;
-use crate::expression::parentheses::{NeedsParentheses, OptionalParentheses, Parentheses};
+use crate::expression::maybe_parenthesize_expression;
+use crate::expression::parentheses::Parenthesize;
+use crate::pattern::maybe_parenthesize_pattern;
 use crate::prelude::*;
 use crate::statement::clause::{clause_body, clause_header, ClauseHeader};
+use crate::statement::suite::SuiteKind;
 
 #[derive(Default)]
-pub struct FormatMatchCase;
+pub struct FormatMatchCase {
+    last_suite_in_statement: bool,
+}
+
+impl FormatRuleWithOptions<MatchCase, PyFormatContext<'_>> for FormatMatchCase {
+    type Options = bool;
+
+    fn with_options(mut self, options: Self::Options) -> Self {
+        self.last_suite_in_statement = options;
+        self
+    }
+}
 
 impl FormatNodeRule<MatchCase> for FormatMatchCase {
     fn fmt_fields(&self, item: &MatchCase, f: &mut PyFormatter) -> FormatResult<()> {
@@ -23,58 +34,34 @@ impl FormatNodeRule<MatchCase> for FormatMatchCase {
         let comments = f.context().comments().clone();
         let dangling_item_comments = comments.dangling(item);
 
+        let format_guard = guard.as_deref().map(|guard| {
+            format_with(|f| {
+                write!(f, [space(), token("if"), space()])?;
+
+                maybe_parenthesize_expression(guard, item, Parenthesize::IfBreaksParenthesized)
+                    .fmt(f)
+            })
+        });
+
         write!(
             f,
             [
                 clause_header(
                     ClauseHeader::MatchCase(item),
                     dangling_item_comments,
-                    &format_with(|f| {
-                        write!(f, [token("case"), space()])?;
-
-                        let has_comments = comments.has_leading(pattern)
-                            || comments.has_trailing_own_line(pattern);
-
-                        if has_comments {
-                            pattern.format().with_options(Parentheses::Always).fmt(f)?;
-                        } else {
-                            match pattern.needs_parentheses(item.as_any_node_ref(), f.context()) {
-                                OptionalParentheses::Multiline => {
-                                    parenthesize_if_expands(
-                                        &pattern.format().with_options(Parentheses::Never),
-                                    )
-                                    .fmt(f)?;
-                                }
-                                OptionalParentheses::Always => {
-                                    pattern.format().with_options(Parentheses::Always).fmt(f)?;
-                                }
-                                OptionalParentheses::Never => {
-                                    pattern.format().with_options(Parentheses::Never).fmt(f)?;
-                                }
-                                OptionalParentheses::BestFit => {
-                                    pattern.format().with_options(Parentheses::Never).fmt(f)?;
-                                }
-                            }
-                        }
-
-                        if let Some(guard) = guard {
-                            write!(f, [space(), token("if"), space(), guard.format()])?;
-                        }
-
-                        Ok(())
-                    }),
+                    &format_args![
+                        token("case"),
+                        space(),
+                        maybe_parenthesize_pattern(pattern, item),
+                        format_guard
+                    ],
                 ),
-                clause_body(body, dangling_item_comments),
+                clause_body(
+                    body,
+                    SuiteKind::other(self.last_suite_in_statement),
+                    dangling_item_comments
+                ),
             ]
         )
-    }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        // Handled as part of `fmt_fields`
-        Ok(())
     }
 }

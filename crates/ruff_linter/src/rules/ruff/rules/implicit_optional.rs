@@ -3,10 +3,10 @@ use std::fmt;
 use anyhow::Result;
 
 use ruff_diagnostics::{Diagnostic, Edit, Fix, FixAvailability, Violation};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 
-use ruff_python_ast::{self as ast, Expr, Operator, ParameterWithDefault, Parameters};
-use ruff_python_parser::typing::parse_type_annotation;
+use ruff_python_ast::name::Name;
+use ruff_python_ast::{self as ast, Expr, Operator, Parameters};
 use ruff_text_size::{Ranged, TextRange};
 
 use crate::checkers::ast::Checker;
@@ -74,8 +74,8 @@ use super::super::typing::type_hint_explicitly_allows_none;
 /// - `target-version`
 ///
 /// [PEP 484]: https://peps.python.org/pep-0484/#union-types
-#[violation]
-pub struct ImplicitOptional {
+#[derive(ViolationMetadata)]
+pub(crate) struct ImplicitOptional {
     conversion_type: ConversionType,
 }
 
@@ -84,7 +84,7 @@ impl Violation for ImplicitOptional {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("PEP 484 prohibits implicit `Optional`")
+        "PEP 484 prohibits implicit `Optional`".to_string()
     }
 
     fn fix_title(&self) -> Option<String> {
@@ -145,7 +145,7 @@ fn generate_fix(checker: &Checker, conversion_type: ConversionType, expr: &Expr)
             let new_expr = Expr::Subscript(ast::ExprSubscript {
                 range: TextRange::default(),
                 value: Box::new(Expr::Name(ast::ExprName {
-                    id: binding,
+                    id: Name::new(binding),
                     ctx: ast::ExprContext::Store,
                     range: TextRange::default(),
                 })),
@@ -162,39 +162,21 @@ fn generate_fix(checker: &Checker, conversion_type: ConversionType, expr: &Expr)
 }
 
 /// RUF013
-pub(crate) fn implicit_optional(checker: &mut Checker, parameters: &Parameters) {
-    for ParameterWithDefault {
-        parameter,
-        default,
-        range: _,
-    } in parameters
-        .posonlyargs
-        .iter()
-        .chain(&parameters.args)
-        .chain(&parameters.kwonlyargs)
-    {
-        let Some(default) = default else { continue };
-        if !default.is_none_literal_expr() {
+pub(crate) fn implicit_optional(checker: &Checker, parameters: &Parameters) {
+    for parameter in parameters.iter_non_variadic_params() {
+        let Some(Expr::NoneLiteral(_)) = parameter.default() else {
             continue;
-        }
-        let Some(annotation) = &parameter.annotation else {
+        };
+        let Some(annotation) = parameter.annotation() else {
             continue;
         };
 
-        if let Expr::StringLiteral(ast::ExprStringLiteral {
-            range,
-            value: string,
-            ..
-        }) = annotation.as_ref()
-        {
+        if let Expr::StringLiteral(string_expr) = annotation {
             // Quoted annotation.
-            if let Ok((annotation, kind)) =
-                parse_type_annotation(string, *range, checker.locator().contents())
-            {
+            if let Ok(parsed_annotation) = checker.parse_type_annotation(string_expr) {
                 let Some(expr) = type_hint_explicitly_allows_none(
-                    &annotation,
-                    checker.semantic(),
-                    checker.locator(),
+                    parsed_annotation.expression(),
+                    checker,
                     checker.settings.target_version.minor(),
                 ) else {
                     continue;
@@ -203,17 +185,16 @@ pub(crate) fn implicit_optional(checker: &mut Checker, parameters: &Parameters) 
 
                 let mut diagnostic =
                     Diagnostic::new(ImplicitOptional { conversion_type }, expr.range());
-                if kind.is_simple() {
+                if parsed_annotation.kind().is_simple() {
                     diagnostic.try_set_fix(|| generate_fix(checker, conversion_type, expr));
                 }
-                checker.diagnostics.push(diagnostic);
+                checker.report_diagnostic(diagnostic);
             }
         } else {
             // Unquoted annotation.
             let Some(expr) = type_hint_explicitly_allows_none(
                 annotation,
-                checker.semantic(),
-                checker.locator(),
+                checker,
                 checker.settings.target_version.minor(),
             ) else {
                 continue;
@@ -223,7 +204,7 @@ pub(crate) fn implicit_optional(checker: &mut Checker, parameters: &Parameters) 
             let mut diagnostic =
                 Diagnostic::new(ImplicitOptional { conversion_type }, expr.range());
             diagnostic.try_set_fix(|| generate_fix(checker, conversion_type, expr));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }

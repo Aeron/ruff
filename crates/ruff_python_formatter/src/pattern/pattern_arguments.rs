@@ -1,10 +1,8 @@
 use ruff_formatter::write;
-use ruff_python_ast::AstNode;
 use ruff_python_ast::{Pattern, PatternArguments};
 use ruff_python_trivia::{SimpleTokenKind, SimpleTokenizer};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
-use crate::comments::SourceComment;
 use crate::expression::parentheses::{empty_parenthesized, parenthesized, Parentheses};
 use crate::prelude::*;
 
@@ -49,7 +47,7 @@ impl FormatNodeRule<PatternArguments> for FormatPatternArguments {
                                 pattern.format().with_options(Parentheses::Preserve),
                             )
                         }))
-                        .nodes(item.keywords.iter());
+                        .nodes(&item.keywords);
                 }
             }
 
@@ -64,21 +62,13 @@ impl FormatNodeRule<PatternArguments> for FormatPatternArguments {
         // )
         // ```
         let comments = f.context().comments().clone();
-        let dangling_comments = comments.dangling(item.as_any_node_ref());
+        let dangling_comments = comments.dangling(item);
 
         write!(
             f,
             [parenthesized("(", &group(&all_arguments), ")")
                 .with_dangling_comments(dangling_comments)]
         )
-    }
-
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        Ok(())
     }
 }
 

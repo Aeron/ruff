@@ -1,30 +1,32 @@
+use std::fmt::{Debug, Formatter};
+use std::iter::FusedIterator;
+
+use bitflags::bitflags;
+
 pub(crate) use extraneous_whitespace::*;
 pub(crate) use indentation::*;
 pub(crate) use missing_whitespace::*;
 pub(crate) use missing_whitespace_after_keyword::*;
 pub(crate) use missing_whitespace_around_operator::*;
+pub(crate) use redundant_backslash::*;
+use ruff_python_parser::{TokenKind, Tokens};
+use ruff_python_trivia::is_python_whitespace;
+use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 pub(crate) use space_around_operator::*;
 pub(crate) use whitespace_around_keywords::*;
 pub(crate) use whitespace_around_named_parameter_equals::*;
 pub(crate) use whitespace_before_comment::*;
 pub(crate) use whitespace_before_parameters::*;
 
-use std::fmt::{Debug, Formatter};
-use std::iter::FusedIterator;
-
-use bitflags::bitflags;
-use ruff_python_parser::lexer::LexResult;
-use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
-
-use ruff_python_parser::TokenKind;
-use ruff_python_trivia::is_python_whitespace;
-use ruff_source_file::Locator;
+use crate::rules::pycodestyle::helpers::is_non_logical_token;
+use crate::Locator;
 
 mod extraneous_whitespace;
 mod indentation;
 mod missing_whitespace;
 mod missing_whitespace_after_keyword;
 mod missing_whitespace_around_operator;
+mod redundant_backslash;
 mod space_around_operator;
 mod whitespace_around_keywords;
 mod whitespace_around_named_parameter_equals;
@@ -35,18 +37,17 @@ bitflags! {
     #[derive(Default, Eq, PartialEq, Clone, Copy, Debug)]
     pub(crate) struct TokenFlags: u8 {
         /// Whether the logical line contains an operator.
-        const OPERATOR = 0b0000_0001;
+        const OPERATOR = 1 << 0;
         /// Whether the logical line contains a bracket.
-        const BRACKET = 0b0000_0010;
+        const BRACKET = 1 << 1;
         /// Whether the logical line contains a punctuation mark.
-        const PUNCTUATION = 0b0000_0100;
+        const PUNCTUATION = 1 << 2;
         /// Whether the logical line contains a keyword.
-        const KEYWORD = 0b0000_1000;
+        const KEYWORD = 1 << 3;
         /// Whether the logical line contains a comment.
-        const COMMENT = 0b0001_0000;
-
+        const COMMENT = 1 << 4;
         /// Whether the logical line contains any non trivia token (no comment, newline, or in/dedent)
-        const NON_TRIVIA = 0b0010_0000;
+        const NON_TRIVIA = 1 << 5;
     }
 }
 
@@ -58,27 +59,17 @@ pub(crate) struct LogicalLines<'a> {
 }
 
 impl<'a> LogicalLines<'a> {
-    pub(crate) fn from_tokens(tokens: &'a [LexResult], locator: &'a Locator<'a>) -> Self {
+    pub(crate) fn from_tokens(tokens: &Tokens, locator: &'a Locator<'a>) -> Self {
         assert!(u32::try_from(tokens.len()).is_ok());
 
         let mut builder = LogicalLinesBuilder::with_capacity(tokens.len());
-        let mut parens = 0u32;
+        let mut tokens_iter = tokens.iter_with_context();
 
-        for (token, range) in tokens.iter().flatten() {
-            let token_kind = TokenKind::from_token(token);
-            builder.push_token(token_kind, *range);
+        while let Some(token) = tokens_iter.next() {
+            builder.push_token(token.kind(), token.range());
 
-            match token_kind {
-                TokenKind::Lbrace | TokenKind::Lpar | TokenKind::Lsqb => {
-                    parens = parens.saturating_add(1);
-                }
-                TokenKind::Rbrace | TokenKind::Rpar | TokenKind::Rsqb => {
-                    parens = parens.saturating_sub(1);
-                }
-                TokenKind::Newline | TokenKind::NonLogicalNewline if parens == 0 => {
-                    builder.finish_line();
-                }
-                _ => {}
+            if token.kind().is_any_newline() && !tokens_iter.in_parenthesized_context() {
+                builder.finish_line();
             }
         }
 
@@ -111,7 +102,7 @@ impl<'a> IntoIterator for &'a LogicalLines<'a> {
 /// line breaks.
 ///
 /// ## Examples
-/// This expression forms one logical line because because the array elements are parenthesized.
+/// This expression forms one logical line because the array elements are parenthesized.
 ///
 /// ```python
 /// a = [
@@ -167,32 +158,14 @@ impl<'a> LogicalLine<'a> {
 
         let start = tokens
             .iter()
-            .position(|t| {
-                !matches!(
-                    t.kind(),
-                    TokenKind::Newline
-                        | TokenKind::NonLogicalNewline
-                        | TokenKind::Indent
-                        | TokenKind::Dedent
-                        | TokenKind::Comment,
-                )
-            })
+            .position(|t| !is_non_logical_token(t.kind()))
             .unwrap_or(tokens.len());
 
         let tokens = &tokens[start..];
 
         let end = tokens
             .iter()
-            .rposition(|t| {
-                !matches!(
-                    t.kind(),
-                    TokenKind::Newline
-                        | TokenKind::NonLogicalNewline
-                        | TokenKind::Indent
-                        | TokenKind::Dedent
-                        | TokenKind::Comment,
-                )
-            })
+            .rposition(|t| !is_non_logical_token(t.kind()))
             .map_or(0, |pos| pos + 1);
 
         &tokens[..end]
@@ -381,20 +354,16 @@ impl Whitespace {
             }
         }
 
-        if has_tabs {
+        if len == content.text_len() {
+            // All whitespace up to the start of the line -> Indent
+            (Self::None, TextSize::default())
+        } else if has_tabs {
             (Self::Tab, len)
         } else {
             match count {
                 0 => (Self::None, TextSize::default()),
                 1 => (Self::Single, len),
-                _ => {
-                    if len == content.text_len() {
-                        // All whitespace up to the start of the line -> Indent
-                        (Self::None, TextSize::default())
-                    } else {
-                        (Self::Many, len)
-                    }
-                }
+                _ => (Self::Many, len),
             }
         }
     }
@@ -451,14 +420,7 @@ impl LogicalLinesBuilder {
             line.flags.insert(TokenFlags::KEYWORD);
         }
 
-        if !matches!(
-            kind,
-            TokenKind::Comment
-                | TokenKind::Newline
-                | TokenKind::NonLogicalNewline
-                | TokenKind::Dedent
-                | TokenKind::Indent
-        ) {
+        if !is_non_logical_token(kind) {
             line.flags.insert(TokenFlags::NON_TRIVIA);
         }
 
@@ -472,7 +434,7 @@ impl LogicalLinesBuilder {
         if self.current_line.tokens_start < end {
             let is_empty = self.tokens[self.current_line.tokens_start as usize..end as usize]
                 .iter()
-                .all(|token| token.kind.is_newline());
+                .all(|token| token.kind.is_any_newline());
             if !is_empty {
                 self.lines.push(Line {
                     flags: self.current_line.flags,
@@ -506,12 +468,121 @@ struct Line {
     tokens_end: u32,
 }
 
+/// Keeps track of whether we are currently visiting a class or function definition in a
+/// [`LogicalLine`]. If we are visiting a class or function, the enum also keeps track
+/// of the [type parameters] of the class/function.
+///
+/// Call [`DefinitionState::visit_token_kind`] on the [`TokenKind`] of each
+/// successive [`LogicalLineToken`] to ensure the state remains up to date.
+///
+/// [type parameters]: https://docs.python.org/3/reference/compound_stmts.html#type-params
+#[derive(Debug, Clone, Copy)]
+enum DefinitionState {
+    InClass(TypeParamsState),
+    InFunction(TypeParamsState),
+    InTypeAlias(TypeParamsState),
+    NotInDefinition,
+}
+
+impl DefinitionState {
+    fn from_tokens<'a>(tokens: impl IntoIterator<Item = &'a LogicalLineToken>) -> Self {
+        let mut token_kinds = tokens.into_iter().map(LogicalLineToken::kind);
+        while let Some(token_kind) = token_kinds.next() {
+            let state = match token_kind {
+                TokenKind::Indent | TokenKind::Dedent => continue,
+                TokenKind::Class => Self::InClass(TypeParamsState::default()),
+                TokenKind::Def => Self::InFunction(TypeParamsState::default()),
+                TokenKind::Async if matches!(token_kinds.next(), Some(TokenKind::Def)) => {
+                    Self::InFunction(TypeParamsState::default())
+                }
+                TokenKind::Type => Self::InTypeAlias(TypeParamsState::default()),
+                _ => Self::NotInDefinition,
+            };
+            return state;
+        }
+        Self::NotInDefinition
+    }
+
+    const fn in_function_definition(self) -> bool {
+        matches!(self, Self::InFunction(_))
+    }
+
+    const fn type_params_state(self) -> Option<TypeParamsState> {
+        match self {
+            Self::InClass(state) | Self::InFunction(state) | Self::InTypeAlias(state) => {
+                Some(state)
+            }
+            Self::NotInDefinition => None,
+        }
+    }
+
+    fn in_type_params(self) -> bool {
+        matches!(
+            self.type_params_state(),
+            Some(TypeParamsState::InTypeParams { .. })
+        )
+    }
+
+    fn visit_token_kind(&mut self, token_kind: TokenKind) {
+        let type_params_state_mut = match self {
+            Self::InClass(type_params_state)
+            | Self::InFunction(type_params_state)
+            | Self::InTypeAlias(type_params_state) => type_params_state,
+            Self::NotInDefinition => return,
+        };
+        match token_kind {
+            TokenKind::Lpar | TokenKind::Equal if type_params_state_mut.before_type_params() => {
+                *type_params_state_mut = TypeParamsState::TypeParamsEnded;
+            }
+            TokenKind::Lsqb => match type_params_state_mut {
+                TypeParamsState::TypeParamsEnded => {}
+                TypeParamsState::BeforeTypeParams => {
+                    *type_params_state_mut = TypeParamsState::InTypeParams {
+                        inner_square_brackets: 0,
+                    };
+                }
+                TypeParamsState::InTypeParams {
+                    inner_square_brackets,
+                } => *inner_square_brackets += 1,
+            },
+            TokenKind::Rsqb => {
+                if let TypeParamsState::InTypeParams {
+                    inner_square_brackets,
+                } = type_params_state_mut
+                {
+                    if *inner_square_brackets == 0 {
+                        *type_params_state_mut = TypeParamsState::TypeParamsEnded;
+                    } else {
+                        *inner_square_brackets -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum TypeParamsState {
+    #[default]
+    BeforeTypeParams,
+    InTypeParams {
+        inner_square_brackets: u32,
+    },
+    TypeParamsEnded,
+}
+
+impl TypeParamsState {
+    const fn before_type_params(self) -> bool {
+        matches!(self, Self::BeforeTypeParams)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use ruff_python_parser::lexer::LexResult;
-    use ruff_python_parser::{lexer, Mode};
+    use ruff_python_parser::parse_module;
 
-    use ruff_source_file::Locator;
+    use crate::Locator;
 
     use super::LogicalLines;
 
@@ -594,9 +665,9 @@ if False:
     }
 
     fn assert_logical_lines(contents: &str, expected: &[&str]) {
-        let lxr: Vec<LexResult> = lexer::lex(contents, Mode::Module).collect();
+        let parsed = parse_module(contents).unwrap();
         let locator = Locator::new(contents);
-        let actual: Vec<String> = LogicalLines::from_tokens(&lxr, &locator)
+        let actual: Vec<String> = LogicalLines::from_tokens(parsed.tokens(), &locator)
             .into_iter()
             .map(|line| line.text_trimmed())
             .map(ToString::to_string)

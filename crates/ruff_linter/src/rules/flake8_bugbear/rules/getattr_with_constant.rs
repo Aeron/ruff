@@ -1,11 +1,12 @@
-use crate::fix::edits::pad;
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::{self as ast, Expr};
 use ruff_python_stdlib::identifiers::{is_identifier, is_mangled_private};
+use ruff_source_file::LineRanges;
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
+use crate::fix::edits::pad;
 
 /// ## What it does
 /// Checks for uses of `getattr` that take a constant attribute value as an
@@ -30,16 +31,15 @@ use crate::checkers::ast::Checker;
 ///
 /// ## References
 /// - [Python documentation: `getattr`](https://docs.python.org/3/library/functions.html#getattr)
-#[violation]
-pub struct GetAttrWithConstant;
+#[derive(ViolationMetadata)]
+pub(crate) struct GetAttrWithConstant;
 
 impl AlwaysFixableViolation for GetAttrWithConstant {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!(
-            "Do not call `getattr` with a constant attribute value. It is not any safer than \
-             normal property access."
-        )
+        "Do not call `getattr` with a constant attribute value. It is not any safer than \
+            normal property access."
+            .to_string()
     }
 
     fn fix_title(&self) -> String {
@@ -48,18 +48,7 @@ impl AlwaysFixableViolation for GetAttrWithConstant {
 }
 
 /// B009
-pub(crate) fn getattr_with_constant(
-    checker: &mut Checker,
-    expr: &Expr,
-    func: &Expr,
-    args: &[Expr],
-) {
-    let Expr::Name(ast::ExprName { id, .. }) = func else {
-        return;
-    };
-    if id != "getattr" {
-        return;
-    }
+pub(crate) fn getattr_with_constant(checker: &Checker, expr: &Expr, func: &Expr, args: &[Expr]) {
     let [obj, arg] = args else {
         return;
     };
@@ -69,13 +58,13 @@ pub(crate) fn getattr_with_constant(
     let Expr::StringLiteral(ast::ExprStringLiteral { value, .. }) = arg else {
         return;
     };
-    if !is_identifier(value) {
+    if !is_identifier(value.to_str()) {
         return;
     }
-    if is_mangled_private(value) {
+    if is_mangled_private(value.to_str()) {
         return;
     }
-    if !checker.semantic().is_builtin("getattr") {
+    if !checker.semantic().match_builtin_expr(func, "getattr") {
         return;
     }
 
@@ -99,5 +88,5 @@ pub(crate) fn getattr_with_constant(
         ),
         expr.range(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }

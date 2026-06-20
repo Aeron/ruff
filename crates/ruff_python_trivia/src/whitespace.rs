@@ -1,29 +1,28 @@
-use ruff_source_file::Locator;
+use ruff_source_file::LineRanges;
 use ruff_text_size::{TextRange, TextSize};
 
 /// Extract the leading indentation from a line.
-pub fn indentation_at_offset<'a>(offset: TextSize, locator: &'a Locator) -> Option<&'a str> {
-    let line_start = locator.line_start(offset);
-    let indentation = locator.slice(TextRange::new(line_start, offset));
+pub fn indentation_at_offset(offset: TextSize, source: &str) -> Option<&str> {
+    let line_start = source.line_start(offset);
+    let indentation = &source[TextRange::new(line_start, offset)];
 
-    if indentation.chars().all(is_python_whitespace) {
-        Some(indentation)
-    } else {
-        None
-    }
+    indentation
+        .chars()
+        .all(is_python_whitespace)
+        .then_some(indentation)
 }
 
 /// Return `true` if the node starting the given [`TextSize`] has leading content.
-pub fn has_leading_content(offset: TextSize, locator: &Locator) -> bool {
-    let line_start = locator.line_start(offset);
-    let leading = locator.slice(TextRange::new(line_start, offset));
+pub fn has_leading_content(offset: TextSize, source: &str) -> bool {
+    let line_start = source.line_start(offset);
+    let leading = &source[TextRange::new(line_start, offset)];
     leading.chars().any(|char| !is_python_whitespace(char))
 }
 
 /// Return `true` if the node ending at the given [`TextSize`] has trailing content.
-pub fn has_trailing_content(offset: TextSize, locator: &Locator) -> bool {
-    let line_end = locator.line_end(offset);
-    let trailing = locator.slice(TextRange::new(offset, line_end));
+pub fn has_trailing_content(offset: TextSize, source: &str) -> bool {
+    let line_end = source.line_end(offset);
+    let trailing = &source[TextRange::new(offset, line_end)];
 
     for char in trailing.chars() {
         if char == '#' {
@@ -77,53 +76,5 @@ impl PythonWhitespace for str {
 
     fn trim_whitespace_end(&self) -> &Self {
         self.trim_end_matches(is_python_whitespace)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ruff_python_parser::{parse_suite, ParseError};
-    use ruff_source_file::Locator;
-    use ruff_text_size::Ranged;
-
-    use crate::has_trailing_content;
-
-    #[test]
-    fn trailing_content() -> Result<(), ParseError> {
-        let contents = "x = 1";
-        let program = parse_suite(contents, "<filename>")?;
-        let stmt = program.first().unwrap();
-        let locator = Locator::new(contents);
-        assert!(!has_trailing_content(stmt.end(), &locator));
-
-        let contents = "x = 1; y = 2";
-        let program = parse_suite(contents, "<filename>")?;
-        let stmt = program.first().unwrap();
-        let locator = Locator::new(contents);
-        assert!(has_trailing_content(stmt.end(), &locator));
-
-        let contents = "x = 1  ";
-        let program = parse_suite(contents, "<filename>")?;
-        let stmt = program.first().unwrap();
-        let locator = Locator::new(contents);
-        assert!(!has_trailing_content(stmt.end(), &locator));
-
-        let contents = "x = 1  # Comment";
-        let program = parse_suite(contents, "<filename>")?;
-        let stmt = program.first().unwrap();
-        let locator = Locator::new(contents);
-        assert!(!has_trailing_content(stmt.end(), &locator));
-
-        let contents = r"
-x = 1
-y = 2
-"
-        .trim();
-        let program = parse_suite(contents, "<filename>")?;
-        let stmt = program.first().unwrap();
-        let locator = Locator::new(contents);
-        assert!(!has_trailing_content(stmt.end(), &locator));
-
-        Ok(())
     }
 }

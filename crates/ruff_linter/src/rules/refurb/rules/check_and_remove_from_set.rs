@@ -1,5 +1,5 @@
 use ruff_diagnostics::{AlwaysFixableViolation, Diagnostic, Edit, Fix};
-use ruff_macros::{derive_message_formats, violation};
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::helpers::contains_effect;
 use ruff_python_ast::{self as ast, CmpOp, Expr, Stmt};
@@ -39,8 +39,8 @@ use crate::fix::snippet::SourceCodeSnippet;
 ///
 /// ## References
 /// - [Python documentation: `set.discard()`](https://docs.python.org/3/library/stdtypes.html?highlight=list#frozenset.discard)
-#[violation]
-pub struct CheckAndRemoveFromSet {
+#[derive(ViolationMetadata)]
+pub(crate) struct CheckAndRemoveFromSet {
     element: SourceCodeSnippet,
     set: String,
 }
@@ -67,7 +67,7 @@ impl AlwaysFixableViolation for CheckAndRemoveFromSet {
 }
 
 /// FURB132
-pub(crate) fn check_and_remove_from_set(checker: &mut Checker, if_stmt: &ast::StmtIf) {
+pub(crate) fn check_and_remove_from_set(checker: &Checker, if_stmt: &ast::StmtIf) {
     // In order to fit the profile, we need if without else clauses and with only one statement in its body.
     if if_stmt.body.len() != 1 || !if_stmt.elif_else_clauses.is_empty() {
         return;
@@ -89,7 +89,7 @@ pub(crate) fn check_and_remove_from_set(checker: &mut Checker, if_stmt: &ast::St
         // `element` in the check should be the same as `element` in the body
         || !compare(&check_element.into(), &remove_element.into())
         // `element` shouldn't have a side effect, otherwise we might change the semantics of the program.
-        || contains_effect(check_element, |id| checker.semantic().is_builtin(id))
+        || contains_effect(check_element, |id| checker.semantic().has_builtin_binding(id))
     {
         return;
     }
@@ -116,7 +116,7 @@ pub(crate) fn check_and_remove_from_set(checker: &mut Checker, if_stmt: &ast::St
         if_stmt.start(),
         if_stmt.end(),
     )));
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 }
 
 fn compare(lhs: &ComparableExpr, rhs: &ComparableExpr) -> bool {
@@ -132,11 +132,11 @@ fn match_check(if_stmt: &ast::StmtIf) -> Option<(&Expr, &ast::ExprName)> {
         ..
     } = if_stmt.test.as_compare_expr()?;
 
-    if ops.as_slice() != [CmpOp::In] {
+    if **ops != [CmpOp::In] {
         return None;
     }
 
-    let [Expr::Name(right @ ast::ExprName { .. })] = comparators.as_slice() else {
+    let [Expr::Name(right @ ast::ExprName { .. })] = &**comparators else {
         return None;
     };
 
@@ -165,7 +165,7 @@ fn match_remove(if_stmt: &ast::StmtIf) -> Option<(&Expr, &ast::ExprName)> {
         return None;
     };
 
-    let [arg] = args.as_slice() else {
+    let [arg] = &**args else {
         return None;
     };
 
@@ -191,8 +191,8 @@ fn make_suggestion(set: &ast::ExprName, element: &Expr, generator: Generator) ->
     let call = ast::ExprCall {
         func: Box::new(attr.into()),
         arguments: ast::Arguments {
-            args: vec![element.clone()],
-            keywords: vec![],
+            args: Box::from([element.clone()]),
+            keywords: Box::from([]),
             range: TextRange::default(),
         },
         range: TextRange::default(),

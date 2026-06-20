@@ -1,13 +1,16 @@
 use ruff_python_ast::str::raw_contents_range;
+use ruff_python_semantic::all::DunderAllName;
+use ruff_python_semantic::{
+    BindingKind, ContextualizedDefinition, Definition, Export, Member, MemberKind,
+};
+use ruff_source_file::LineRanges;
 use ruff_text_size::{Ranged, TextRange};
-
-use ruff_python_semantic::{BindingKind, ContextualizedDefinition, Export};
 
 use crate::checkers::ast::Checker;
 use crate::codes::Rule;
 use crate::docstrings::Docstring;
 use crate::fs::relativize_path;
-use crate::rules::{flake8_annotations, flake8_pyi, pydocstyle};
+use crate::rules::{flake8_annotations, flake8_pyi, pydoclint, pydocstyle, pylint};
 use crate::{docstrings, warn_user};
 
 /// Run lint rules over all [`Definition`] nodes in the [`SemanticModel`].
@@ -24,48 +27,47 @@ pub(crate) fn definitions(checker: &mut Checker) {
         Rule::MissingReturnTypeStaticMethod,
         Rule::MissingReturnTypeUndocumentedPublicFunction,
         Rule::MissingTypeArgs,
-        Rule::MissingTypeCls,
         Rule::MissingTypeFunctionArgument,
         Rule::MissingTypeKwargs,
-        Rule::MissingTypeSelf,
     ]);
     let enforce_stubs = checker.source_type.is_stub() && checker.enabled(Rule::DocstringInStub);
     let enforce_stubs_and_runtime = checker.enabled(Rule::IterMethodReturnIterable);
+    let enforce_dunder_method = checker.enabled(Rule::BadDunderMethodName);
     let enforce_docstrings = checker.any_enabled(&[
-        Rule::BlankLineAfterLastSection,
-        Rule::BlankLineAfterSummary,
+        Rule::MissingBlankLineAfterLastSection,
+        Rule::MissingBlankLineAfterSummary,
         Rule::BlankLineBeforeClass,
         Rule::BlankLinesBetweenHeaderAndContent,
-        Rule::CapitalizeSectionName,
-        Rule::DashedUnderlineAfterSection,
+        Rule::NonCapitalizedSectionName,
+        Rule::MissingDashedUnderlineAfterSection,
         Rule::DocstringStartsWithThis,
         Rule::EmptyDocstring,
         Rule::EmptyDocstringSection,
-        Rule::EndsInPeriod,
-        Rule::EndsInPunctuation,
+        Rule::MissingTrailingPeriod,
+        Rule::MissingTerminalPunctuation,
         Rule::EscapeSequenceInDocstring,
-        Rule::FirstLineCapitalized,
-        Rule::FitsOnOneLine,
-        Rule::IndentWithSpaces,
+        Rule::FirstWordUncapitalized,
+        Rule::UnnecessaryMultilineDocstring,
+        Rule::DocstringTabIndentation,
         Rule::MultiLineSummaryFirstLine,
         Rule::MultiLineSummarySecondLine,
         Rule::NewLineAfterLastParagraph,
-        Rule::NewLineAfterSectionName,
-        Rule::NoBlankLineAfterFunction,
+        Rule::MissingNewLineAfterSectionName,
+        Rule::BlankLineAfterFunction,
         Rule::NoBlankLineAfterSection,
-        Rule::NoBlankLineBeforeFunction,
+        Rule::BlankLineBeforeFunction,
         Rule::NoBlankLineBeforeSection,
-        Rule::NoSignature,
+        Rule::SignatureInDocstring,
         Rule::NonImperativeMood,
-        Rule::OneBlankLineAfterClass,
-        Rule::OneBlankLineBeforeClass,
+        Rule::IncorrectBlankLineAfterClass,
+        Rule::IncorrectBlankLineBeforeClass,
         Rule::OverIndentation,
         Rule::OverloadWithDocstring,
-        Rule::SectionNameEndsInColon,
-        Rule::SectionNotOverIndented,
-        Rule::SectionUnderlineAfterName,
-        Rule::SectionUnderlineMatchesSectionLength,
-        Rule::SectionUnderlineNotOverIndented,
+        Rule::MissingSectionNameColon,
+        Rule::OverindentedSection,
+        Rule::MissingSectionUnderlineAfterName,
+        Rule::MismatchedSectionUnderlineLength,
+        Rule::OverindentedSectionUnderline,
         Rule::SurroundingWhitespace,
         Rule::TripleSingleQuotes,
         Rule::UnderIndentation,
@@ -79,13 +81,27 @@ pub(crate) fn definitions(checker: &mut Checker) {
         Rule::UndocumentedPublicNestedClass,
         Rule::UndocumentedPublicPackage,
     ]);
+    let enforce_pydoclint = checker.any_enabled(&[
+        Rule::DocstringMissingReturns,
+        Rule::DocstringExtraneousReturns,
+        Rule::DocstringMissingYields,
+        Rule::DocstringExtraneousYields,
+        Rule::DocstringMissingException,
+        Rule::DocstringExtraneousException,
+    ]);
 
-    if !enforce_annotations && !enforce_docstrings && !enforce_stubs && !enforce_stubs_and_runtime {
+    if !enforce_annotations
+        && !enforce_docstrings
+        && !enforce_stubs
+        && !enforce_stubs_and_runtime
+        && !enforce_dunder_method
+        && !enforce_pydoclint
+    {
         return;
     }
 
     // Compute visibility of all definitions.
-    let exports: Option<Vec<&str>> = {
+    let exports: Option<Vec<DunderAllName>> = {
         checker
             .semantic
             .global_scope()
@@ -101,7 +117,7 @@ pub(crate) fn definitions(checker: &mut Checker) {
     };
 
     let definitions = std::mem::take(&mut checker.semantic.definitions);
-    let mut overloaded_name: Option<String> = None;
+    let mut overloaded_name: Option<&str> = None;
     for ContextualizedDefinition {
         definition,
         visibility,
@@ -119,17 +135,15 @@ pub(crate) fn definitions(checker: &mut Checker) {
             if !overloaded_name.is_some_and(|overloaded_name| {
                 flake8_annotations::helpers::is_overload_impl(
                     definition,
-                    &overloaded_name,
+                    overloaded_name,
                     &checker.semantic,
                 )
             }) {
-                checker
-                    .diagnostics
-                    .extend(flake8_annotations::rules::definition(
-                        checker,
-                        definition,
-                        *visibility,
-                    ));
+                checker.report_diagnostics(flake8_annotations::rules::definition(
+                    checker,
+                    definition,
+                    *visibility,
+                ));
             }
             overloaded_name =
                 flake8_annotations::helpers::overloaded_name(definition, &checker.semantic);
@@ -137,42 +151,51 @@ pub(crate) fn definitions(checker: &mut Checker) {
 
         // flake8-pyi
         if enforce_stubs {
-            if checker.enabled(Rule::DocstringInStub) {
-                flake8_pyi::rules::docstring_in_stubs(checker, docstring);
-            }
+            flake8_pyi::rules::docstring_in_stubs(checker, definition, docstring);
         }
         if enforce_stubs_and_runtime {
-            if checker.enabled(Rule::IterMethodReturnIterable) {
-                flake8_pyi::rules::iter_method_return_iterable(checker, definition);
+            flake8_pyi::rules::iter_method_return_iterable(checker, definition);
+        }
+
+        // pylint
+        if enforce_dunder_method {
+            if let Definition::Member(Member {
+                kind: MemberKind::Method(method),
+                ..
+            }) = definition
+            {
+                pylint::rules::bad_dunder_method_name(checker, method);
             }
         }
 
-        // pydocstyle
-        if enforce_docstrings {
+        // pydocstyle, pydoclint
+        if enforce_docstrings || enforce_pydoclint {
             if pydocstyle::helpers::should_ignore_definition(
                 definition,
-                &checker.settings.pydocstyle.ignore_decorators,
+                &checker.settings.pydocstyle,
                 &checker.semantic,
             ) {
                 continue;
             }
 
             // Extract a `Docstring` from a `Definition`.
-            let Some(expr) = docstring else {
+            let Some(string_literal) = docstring else {
                 pydocstyle::rules::not_missing(checker, definition, *visibility);
                 continue;
             };
 
-            let contents = checker.locator().slice(expr);
+            let contents = checker.locator().slice(string_literal);
 
             let indentation = checker.locator().slice(TextRange::new(
-                checker.locator.line_start(expr.start()),
-                expr.start(),
+                checker.locator.line_start(string_literal.start()),
+                string_literal.start(),
             ));
 
-            if expr.implicit_concatenated {
+            if string_literal.value.is_implicit_concatenated() {
                 #[allow(deprecated)]
-                let location = checker.locator.compute_source_location(expr.start());
+                let location = checker
+                    .locator
+                    .compute_source_location(string_literal.start());
                 warn_user!(
                     "Docstring at {}:{}:{} contains implicit string concatenation; ignoring...",
                     relativize_path(checker.path),
@@ -186,7 +209,7 @@ pub(crate) fn definitions(checker: &mut Checker) {
             let body_range = raw_contents_range(contents).unwrap();
             let docstring = Docstring {
                 definition,
-                expr,
+                expr: string_literal,
                 contents,
                 body_range,
                 indentation,
@@ -195,27 +218,24 @@ pub(crate) fn definitions(checker: &mut Checker) {
             if !pydocstyle::rules::not_empty(checker, &docstring) {
                 continue;
             }
-            if checker.enabled(Rule::FitsOnOneLine) {
+            if checker.enabled(Rule::UnnecessaryMultilineDocstring) {
                 pydocstyle::rules::one_liner(checker, &docstring);
             }
-            if checker.any_enabled(&[
-                Rule::NoBlankLineAfterFunction,
-                Rule::NoBlankLineBeforeFunction,
-            ]) {
+            if checker.any_enabled(&[Rule::BlankLineAfterFunction, Rule::BlankLineBeforeFunction]) {
                 pydocstyle::rules::blank_before_after_function(checker, &docstring);
             }
             if checker.any_enabled(&[
                 Rule::BlankLineBeforeClass,
-                Rule::OneBlankLineAfterClass,
-                Rule::OneBlankLineBeforeClass,
+                Rule::IncorrectBlankLineAfterClass,
+                Rule::IncorrectBlankLineBeforeClass,
             ]) {
                 pydocstyle::rules::blank_before_after_class(checker, &docstring);
             }
-            if checker.enabled(Rule::BlankLineAfterSummary) {
+            if checker.enabled(Rule::MissingBlankLineAfterSummary) {
                 pydocstyle::rules::blank_after_summary(checker, &docstring);
             }
             if checker.any_enabled(&[
-                Rule::IndentWithSpaces,
+                Rule::DocstringTabIndentation,
                 Rule::OverIndentation,
                 Rule::UnderIndentation,
             ]) {
@@ -239,53 +259,73 @@ pub(crate) fn definitions(checker: &mut Checker) {
             if checker.enabled(Rule::EscapeSequenceInDocstring) {
                 pydocstyle::rules::backslashes(checker, &docstring);
             }
-            if checker.enabled(Rule::EndsInPeriod) {
+            if checker.enabled(Rule::MissingTrailingPeriod) {
                 pydocstyle::rules::ends_with_period(checker, &docstring);
             }
             if checker.enabled(Rule::NonImperativeMood) {
                 pydocstyle::rules::non_imperative_mood(
                     checker,
                     &docstring,
-                    &checker.settings.pydocstyle.property_decorators,
+                    &checker.settings.pydocstyle,
                 );
             }
-            if checker.enabled(Rule::NoSignature) {
+            if checker.enabled(Rule::SignatureInDocstring) {
                 pydocstyle::rules::no_signature(checker, &docstring);
             }
-            if checker.enabled(Rule::FirstLineCapitalized) {
+            if checker.enabled(Rule::FirstWordUncapitalized) {
                 pydocstyle::rules::capitalized(checker, &docstring);
             }
             if checker.enabled(Rule::DocstringStartsWithThis) {
                 pydocstyle::rules::starts_with_this(checker, &docstring);
             }
-            if checker.enabled(Rule::EndsInPunctuation) {
+            if checker.enabled(Rule::MissingTerminalPunctuation) {
                 pydocstyle::rules::ends_with_punctuation(checker, &docstring);
             }
             if checker.enabled(Rule::OverloadWithDocstring) {
                 pydocstyle::rules::if_needed(checker, &docstring);
             }
-            if checker.any_enabled(&[
-                Rule::BlankLineAfterLastSection,
+
+            let enforce_sections = checker.any_enabled(&[
+                Rule::MissingBlankLineAfterLastSection,
                 Rule::BlankLinesBetweenHeaderAndContent,
-                Rule::CapitalizeSectionName,
-                Rule::DashedUnderlineAfterSection,
+                Rule::NonCapitalizedSectionName,
+                Rule::MissingDashedUnderlineAfterSection,
                 Rule::EmptyDocstringSection,
                 Rule::MultiLineSummaryFirstLine,
-                Rule::NewLineAfterSectionName,
+                Rule::MissingNewLineAfterSectionName,
                 Rule::NoBlankLineAfterSection,
                 Rule::NoBlankLineBeforeSection,
-                Rule::SectionNameEndsInColon,
-                Rule::SectionNotOverIndented,
-                Rule::SectionUnderlineAfterName,
-                Rule::SectionUnderlineMatchesSectionLength,
-                Rule::SectionUnderlineNotOverIndented,
+                Rule::MissingSectionNameColon,
+                Rule::OverindentedSection,
+                Rule::MissingSectionUnderlineAfterName,
+                Rule::MismatchedSectionUnderlineLength,
+                Rule::OverindentedSectionUnderline,
                 Rule::UndocumentedParam,
-            ]) {
-                pydocstyle::rules::sections(
-                    checker,
+            ]);
+            if enforce_sections || enforce_pydoclint {
+                let section_contexts = pydocstyle::helpers::get_section_contexts(
                     &docstring,
-                    checker.settings.pydocstyle.convention.as_ref(),
+                    checker.settings.pydocstyle.convention(),
                 );
+
+                if enforce_sections {
+                    pydocstyle::rules::sections(
+                        checker,
+                        &docstring,
+                        &section_contexts,
+                        checker.settings.pydocstyle.convention(),
+                    );
+                }
+
+                if enforce_pydoclint {
+                    pydoclint::rules::check_docstring(
+                        checker,
+                        definition,
+                        &docstring,
+                        &section_contexts,
+                        checker.settings.pydocstyle.convention(),
+                    );
+                }
             }
         }
     }

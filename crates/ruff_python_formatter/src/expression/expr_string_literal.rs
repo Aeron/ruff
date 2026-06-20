@@ -1,42 +1,67 @@
-use ruff_formatter::FormatRuleWithOptions;
-use ruff_python_ast::AnyNodeRef;
-use ruff_python_ast::ExprStringLiteral;
-use ruff_text_size::{Ranged, TextLen, TextRange};
-
-use crate::comments::SourceComment;
-use crate::expression::parentheses::{NeedsParentheses, OptionalParentheses};
-use crate::expression::string::{
-    AnyString, FormatString, StringLayout, StringPrefix, StringQuotes,
+use crate::builders::parenthesize_if_expands;
+use crate::expression::parentheses::{
+    in_parentheses_only_group, NeedsParentheses, OptionalParentheses,
 };
+use crate::other::string_literal::StringLiteralKind;
 use crate::prelude::*;
+use crate::string::implicit::{
+    FormatImplicitConcatenatedStringExpanded, FormatImplicitConcatenatedStringFlat,
+    ImplicitConcatenatedLayout,
+};
+use crate::string::{implicit::FormatImplicitConcatenatedString, StringLikeExtensions};
+use ruff_formatter::FormatRuleWithOptions;
+use ruff_python_ast::{AnyNodeRef, ExprStringLiteral, StringLike};
 
 #[derive(Default)]
 pub struct FormatExprStringLiteral {
-    layout: StringLayout,
+    kind: StringLiteralKind,
 }
 
 impl FormatRuleWithOptions<ExprStringLiteral, PyFormatContext<'_>> for FormatExprStringLiteral {
-    type Options = StringLayout;
+    type Options = StringLiteralKind;
 
     fn with_options(mut self, options: Self::Options) -> Self {
-        self.layout = options;
+        self.kind = options;
         self
     }
 }
 
 impl FormatNodeRule<ExprStringLiteral> for FormatExprStringLiteral {
     fn fmt_fields(&self, item: &ExprStringLiteral, f: &mut PyFormatter) -> FormatResult<()> {
-        FormatString::new(&AnyString::String(item))
-            .with_layout(self.layout)
-            .fmt(f)
-    }
+        let ExprStringLiteral { value, .. } = item;
 
-    fn fmt_dangling_comments(
-        &self,
-        _dangling_comments: &[SourceComment],
-        _f: &mut PyFormatter,
-    ) -> FormatResult<()> {
-        Ok(())
+        if let [string_literal] = value.as_slice() {
+            string_literal.format().with_options(self.kind).fmt(f)
+        } else {
+            // Always join strings that aren't parenthesized and thus, always on a single line.
+            if !f.context().node_level().is_parenthesized() {
+                if let Some(mut format_flat) =
+                    FormatImplicitConcatenatedStringFlat::new(item.into(), f.context())
+                {
+                    format_flat.set_docstring(self.kind.is_docstring());
+                    return format_flat.fmt(f);
+                }
+
+                // ```py
+                // def test():
+                // (
+                //      r"a"
+                //      "b"
+                // )
+                // ```
+                if self.kind.is_docstring() {
+                    return parenthesize_if_expands(
+                        &FormatImplicitConcatenatedStringExpanded::new(
+                            item.into(),
+                            ImplicitConcatenatedLayout::Multipart,
+                        ),
+                    )
+                    .fmt(f);
+                }
+            }
+
+            in_parentheses_only_group(&FormatImplicitConcatenatedString::new(item)).fmt(f)
+        }
     }
 }
 
@@ -46,26 +71,12 @@ impl NeedsParentheses for ExprStringLiteral {
         _parent: AnyNodeRef,
         context: &PyFormatContext,
     ) -> OptionalParentheses {
-        if self.implicit_concatenated {
+        if self.value.is_implicit_concatenated() {
             OptionalParentheses::Multiline
-        } else if is_multiline_string(self.into(), context.source()) {
+        } else if StringLike::String(self).is_multiline(context) {
             OptionalParentheses::Never
         } else {
             OptionalParentheses::BestFit
         }
-    }
-}
-
-pub(super) fn is_multiline_string(expr: AnyNodeRef, source: &str) -> bool {
-    if expr.is_expr_string_literal() || expr.is_expr_bytes_literal() {
-        let contents = &source[expr.range()];
-        let prefix = StringPrefix::parse(contents);
-        let quotes =
-            StringQuotes::parse(&contents[TextRange::new(prefix.text_len(), contents.text_len())]);
-
-        quotes.is_some_and(StringQuotes::is_triple)
-            && memchr::memchr2(b'\n', b'\r', contents.as_bytes()).is_some()
-    } else {
-        false
     }
 }

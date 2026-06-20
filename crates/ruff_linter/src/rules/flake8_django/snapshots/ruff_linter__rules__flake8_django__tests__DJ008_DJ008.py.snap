@@ -1,5 +1,6 @@
 ---
 source: crates/ruff_linter/src/rules/flake8_django/mod.rs
+snapshot_kind: text
 ---
 DJ008.py:6:7: DJ008 Model does not define `__str__` method
   |
@@ -23,4 +24,10 @@ DJ008.py:36:7: DJ008 Model does not define `__str__` method
 37 |     new_field = models.CharField(max_length=10)
    |
 
-
+DJ008.py:182:7: DJ008 Model does not define `__str__` method
+    |
+181 | # Subclass without __str__
+182 | class SubclassTestModel3(TestModel1):
+    |       ^^^^^^^^^^^^^^^^^^ DJ008
+183 |     pass
+    |

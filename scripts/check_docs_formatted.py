@@ -1,39 +1,46 @@
 #!/usr/bin/env python3
-"""Check code snippets in docs are formatted by black."""
+"""Check code snippets in docs are formatted by Ruff."""
+
 from __future__ import annotations
 
 import argparse
 import os
 import re
+import subprocess
 import textwrap
 from pathlib import Path
 from re import Match
-from typing import TYPE_CHECKING
-
-import black
-from black.mode import Mode, TargetVersion
-from black.parsing import InvalidInput
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-TARGET_VERSIONS = ["py37", "py38", "py39", "py310", "py311"]
 SNIPPED_RE = re.compile(
-    r"(?P<before>^(?P<indent> *)```\s*python\n)"
+    r"(?P<before>^(?P<indent> *)```(?:\s*(?P<language>\w+))?\n)"
     r"(?P<code>.*?)"
     r"(?P<after>^(?P=indent)```\s*$)",
     re.DOTALL | re.MULTILINE,
 )
 
-# For some rules, we don't want black to fix the formatting as this would "fix" the
+# For some rules, we don't want Ruff to fix the formatting as this would "fix" the
 # example.
 KNOWN_FORMATTING_VIOLATIONS = [
     "avoidable-escaped-quote",
     "bad-quotes-docstring",
     "bad-quotes-inline-string",
     "bad-quotes-multiline-string",
+    "blank-line-after-decorator",
+    "blank-line-before-class",
+    "blank-line-before-function",
+    "blank-line-between-methods",
+    "blank-lines-after-function-or-class",
+    "blank-lines-before-nested-definition",
+    "blank-lines-top-level",
+    "docstring-tab-indentation",
     "explicit-string-concatenation",
-    "indent-with-spaces",
+    "f-string-missing-placeholders",
+    "incorrect-blank-line-after-class",
+    "incorrect-blank-line-before-class",
     "indentation-with-invalid-multiple",
     "line-too-long",
     "missing-trailing-comma",
@@ -44,6 +51,7 @@ KNOWN_FORMATTING_VIOLATIONS = [
     "missing-whitespace-around-modulo-operator",
     "missing-whitespace-around-operator",
     "missing-whitespace-around-parameter-equals",
+    "module-import-not-at-top-of-file",
     "multi-line-implicit-string-concatenation",
     "multiple-leading-hashes-for-block-comment",
     "multiple-spaces-after-comma",
@@ -53,21 +61,21 @@ KNOWN_FORMATTING_VIOLATIONS = [
     "multiple-spaces-before-operator",
     "multiple-statements-on-one-line-colon",
     "multiple-statements-on-one-line-semicolon",
-    "no-blank-line-before-function",
     "no-indented-block-comment",
     "no-return-argument-annotation-in-stub",
     "no-space-after-block-comment",
     "no-space-after-inline-comment",
     "non-empty-stub-body",
-    "one-blank-line-after-class",
     "over-indentation",
     "over-indented",
     "pass-statement-stub-body",
     "prohibited-trailing-comma",
+    "redundant-backslash",
     "shebang-leading-whitespace",
+    "single-line-implicit-string-concatenation",
     "surrounding-whitespace",
-    "tab-indentation",
     "too-few-spaces-before-inline-comment",
+    "too-many-blank-lines",
     "too-many-boolean-expressions",
     "trailing-comma-on-bare-tuple",
     "triple-single-quotes",
@@ -78,16 +86,18 @@ KNOWN_FORMATTING_VIOLATIONS = [
     "unnecessary-class-parentheses",
     "unnecessary-escaped-quote",
     "useless-semicolon",
+    "whitespace-after-decorator",
     "whitespace-after-open-bracket",
     "whitespace-before-close-bracket",
     "whitespace-before-parameters",
     "whitespace-before-punctuation",
 ]
 
-# For some docs, black is unable to parse the example code.
+# For some docs, Ruff is unable to parse the example code.
 KNOWN_PARSE_ERRORS = [
     "blank-line-with-whitespace",
     "indentation-with-invalid-multiple-comment",
+    "indented-form-feed",
     "missing-newline-at-end-of-file",
     "mixed-spaces-and-tabs",
     "no-indented-block",
@@ -98,6 +108,7 @@ KNOWN_PARSE_ERRORS = [
     "tab-after-operator",
     "tab-before-keyword",
     "tab-before-operator",
+    "too-many-newlines-at-end-of-file",
     "trailing-whitespace",
     "unexpected-indentation",
 ]
@@ -107,33 +118,67 @@ class CodeBlockError(Exception):
     """A code block parse error."""
 
 
-def format_str(
-    src: str,
-    black_mode: black.FileMode,
-) -> tuple[str, Sequence[CodeBlockError]]:
-    """Format a single docs file string."""
+class InvalidInput(ValueError):
+    """Raised when ruff fails to parse file."""
+
+
+def format_str(code: str, extension: Literal["py", "pyi"]) -> str:
+    """Format a code block with ruff by writing to a temporary file."""
+    # Run ruff to format the tmp file
+    try:
+        completed_process = subprocess.run(
+            ["ruff", "format", "--stdin-filename", f"file.{extension}", "-"],
+            check=True,
+            capture_output=True,
+            text=True,
+            input=code,
+        )
+    except subprocess.CalledProcessError as e:
+        err = e.stderr
+        if "error: Failed to parse" in err:
+            raise InvalidInput(err) from e
+
+        raise NotImplementedError(
+            "This error has not been handled correctly, please update "
+            f"`check_docs_formatted.py\n\nError:\n\n{err}",
+        ) from e
+
+    return completed_process.stdout
+
+
+def format_contents(src: str) -> tuple[str, Sequence[CodeBlockError]]:
+    """Format a single docs content."""
     errors: list[CodeBlockError] = []
 
     def _snipped_match(match: Match[str]) -> str:
+        language = match["language"]
+        extension: Literal["py", "pyi"]
+        match language:
+            case "python":
+                extension = "py"
+            case "pyi":
+                extension = "pyi"
+            case _:
+                # We are only interested in checking the formatting of py or pyi code
+                # blocks so we can return early if the language is not one of these.
+                return f"{match['before']}{match['code']}{match['after']}"
+
         code = textwrap.dedent(match["code"])
         try:
-            code = black.format_str(code, mode=black_mode)
+            code = format_str(code, extension)
         except InvalidInput as e:
             errors.append(CodeBlockError(e))
+        except NotImplementedError as e:
+            raise e
 
         code = textwrap.indent(code, match["indent"])
-        return f'{match["before"]}{code}{match["after"]}'
+        return f"{match['before']}{code}{match['after']}"
 
     src = SNIPPED_RE.sub(_snipped_match, src)
     return src, errors
 
 
-def format_file(
-    file: Path,
-    black_mode: black.FileMode,
-    error_known: bool,
-    args: argparse.Namespace,
-) -> int:
+def format_file(file: Path, error_known: bool, args: argparse.Namespace) -> int:
     """Check the formatting of a single docs file.
 
     Returns the exit code for the script.
@@ -158,7 +203,7 @@ def format_file(
     # Remove everything after the last example
     contents = contents[: contents.rfind("```")] + "```"
 
-    new_contents, errors = format_str(contents, black_mode)
+    new_contents, errors = format_contents(contents)
 
     if errors and not args.skip_errors and not error_known:
         for error in errors:
@@ -194,9 +239,9 @@ def format_file(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Check code snippets in docs are formatted by black."""
+    """Check code snippets in docs are formatted by Ruff."""
     parser = argparse.ArgumentParser(
-        description="Check code snippets in docs are formatted by black.",
+        description="Check code snippets in docs are formatted by Ruff.",
     )
     parser.add_argument("--skip-errors", action="store_true")
     parser.add_argument("--generate-docs", action="store_true")
@@ -225,10 +270,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Please generate rules first.")
         return 1
 
-    black_mode = Mode(
-        target_versions={TargetVersion[val.upper()] for val in TARGET_VERSIONS},
-    )
-
     # Check known formatting violations and parse errors are sorted alphabetically and
     # have no duplicates. This will reduce the diff when adding new violations
 
@@ -252,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     violations = 0
     errors = 0
+    print("Checking docs formatting...")
     for file in [*static_docs, *generated_docs]:
         rule_name = file.name.split(".")[0]
         if rule_name in KNOWN_FORMATTING_VIOLATIONS:
@@ -259,7 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         error_known = rule_name in KNOWN_PARSE_ERRORS
 
-        result = format_file(file, black_mode, error_known, args)
+        result = format_file(file, error_known, args)
         if result == 1:
             violations += 1
         elif result == 2 and not error_known:
@@ -273,6 +315,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if violations > 0 or errors > 0:
         return 1
+
+    print("All docs are formatted correctly.")
 
     return 0
 

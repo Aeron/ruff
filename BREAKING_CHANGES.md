@@ -1,5 +1,180 @@
 # Breaking Changes
 
+## 0.9.0
+
+Ruff now formats your code according to the 2025 style guide. As a result, your code might now get formatted differently. See the [changelog](./CHANGELOG.md#090) for a detailed list of changes.
+
+## 0.8.0
+
+- **Default to Python 3.9**
+
+    Ruff now defaults to Python 3.9 instead of 3.8 if no explicit Python version is configured using [`ruff.target-version`](https://docs.astral.sh/ruff/settings/#target-version) or [`project.requires-python`](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#python-requires) ([#13896](https://github.com/astral-sh/ruff/pull/13896))
+
+- **Changed location of `pydoclint` diagnostics**
+
+    [`pydoclint`](https://docs.astral.sh/ruff/rules/#pydoclint-doc) diagnostics now point to the first-line of the problematic docstring. Previously, this was not the case.
+
+    If you've opted into these preview rules but have them suppressed using
+    [`noqa`](https://docs.astral.sh/ruff/linter/#error-suppression) comments in
+    some places, this change may mean that you need to move the `noqa` suppression
+    comments. Most users should be unaffected by this change.
+
+- **Use XDG (i.e. `~/.local/bin`) instead of the Cargo home directory in the standalone installer**
+
+    Previously, Ruff's installer used `$CARGO_HOME` or `~/.cargo/bin` for its target install directory. Now, Ruff will be installed into `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin`, or `~/.local/bin` (in that order).
+
+    This change is only relevant to users of the standalone Ruff installer (using the shell or PowerShell script). If you installed Ruff using uv or pip, you should be unaffected.
+
+- **Changes to the line width calculation**
+
+    Ruff now uses a new version of the [unicode-width](https://github.com/unicode-rs/unicode-width) Rust crate to calculate the line width. In very rare cases, this may lead to lines containing Unicode characters being reformatted, or being considered too long when they were not before ([`E501`](https://docs.astral.sh/ruff/rules/line-too-long/)).
+
+## 0.7.0
+
+- The pytest rules `PT001` and `PT023` now default to omitting the decorator parentheses when there are no arguments
+    ([#12838](https://github.com/astral-sh/ruff/pull/12838), [#13292](https://github.com/astral-sh/ruff/pull/13292)).
+    This was a change that we attempted to make in Ruff v0.6.0, but only partially made due to an error on our part.
+    See the [blog post](https://astral.sh/blog/ruff-v0.7.0) for more details.
+- The `useless-try-except` rule (in our `tryceratops` category) has been recoded from `TRY302` to
+    `TRY203` ([#13502](https://github.com/astral-sh/ruff/pull/13502)). This ensures Ruff's code is consistent with
+    the same rule in the [`tryceratops`](https://github.com/guilatrova/tryceratops) linter.
+- The `lint.allow-unused-imports` setting has been removed ([#13677](https://github.com/astral-sh/ruff/pull/13677)). Use
+    [`lint.pyflakes.allow-unused-imports`](https://docs.astral.sh/ruff/settings/#lint_pyflakes_allowed-unused-imports)
+    instead.
+
+## 0.6.0
+
+- Detect imports in `src` layouts by default for `isort` rules ([#12848](https://github.com/astral-sh/ruff/pull/12848))
+
+- The pytest rules `PT001` and `PT023` now default to omitting the decorator parentheses when there are no arguments ([#12838](https://github.com/astral-sh/ruff/pull/12838)).
+
+- Lint and format Jupyter Notebook by default ([#12878](https://github.com/astral-sh/ruff/pull/12878)).
+
+    You can disable specific rules for notebooks using [`per-file-ignores`](https://docs.astral.sh/ruff/settings/#lint_per-file-ignores):
+
+    ```toml
+    [tool.ruff.lint.per-file-ignores]
+    "*.ipynb" = ["E501"] # disable line-too-long in notebooks
+    ```
+
+    If you'd prefer to either only lint or only format Jupyter Notebook files, you can use the
+    section-specific `exclude` option to do so. For example, the following would only lint Jupyter
+    Notebook files and not format them:
+
+    ```toml
+    [tool.ruff.format]
+    exclude = ["*.ipynb"]
+    ```
+
+    And, conversely, the following would only format Jupyter Notebook files and not lint them:
+
+    ```toml
+    [tool.ruff.lint]
+    exclude = ["*.ipynb"]
+    ```
+
+    You can completely disable Jupyter Notebook support by updating the [`extend-exclude`](https://docs.astral.sh/ruff/settings/#extend-exclude) setting:
+
+    ```toml
+    [tool.ruff]
+    extend-exclude = ["*.ipynb"]
+    ```
+
+## 0.5.0
+
+- Follow the XDG specification to discover user-level configurations on macOS (same as on other Unix platforms)
+- Selecting `ALL` now excludes deprecated rules
+- The released archives now include an extra level of nesting, which can be removed with `--strip-components=1` when untarring.
+- The release artifact's file name no longer includes the version tag. This enables users to install via `/latest` URLs on GitHub.
+
+## 0.3.0
+
+### Ruff 2024.2 style
+
+The formatter now formats code according to the Ruff 2024.2 style guide. Read the [changelog](./CHANGELOG.md#030) for a detailed list of stabilized style changes.
+
+### `isort`: Use one blank line after imports in typing stub files ([#9971](https://github.com/astral-sh/ruff/pull/9971))
+
+Previously, Ruff used one or two blank lines (or the number configured by `isort.lines-after-imports`) after imports in typing stub files (`.pyi` files).
+The [typing style guide for stubs](https://typing.readthedocs.io/en/latest/source/stubs.html#style-guide) recommends using at most 1 blank line for grouping.
+As of this release, `isort` now always uses one blank line after imports in stub files, the same as the formatter.
+
+### `build` is no longer excluded by default ([#10093](https://github.com/astral-sh/ruff/pull/10093))
+
+Ruff maintains a list of directories and files that are excluded by default. This list now consists of the following patterns:
+
+- `.bzr`
+- `.direnv`
+- `.eggs`
+- `.git`
+- `.git-rewrite`
+- `.hg`
+- `.ipynb_checkpoints`
+- `.mypy_cache`
+- `.nox`
+- `.pants.d`
+- `.pyenv`
+- `.pytest_cache`
+- `.pytype`
+- `.ruff_cache`
+- `.svn`
+- `.tox`
+- `.venv`
+- `.vscode`
+- `__pypackages__`
+- `_build`
+- `buck-out`
+- `dist`
+- `node_modules`
+- `site-packages`
+- `venv`
+
+Previously, the `build` directory was included in this list. However, the `build` directory tends to be a not-unpopular directory
+name, and excluding it by default caused confusion. Ruff now no longer excludes `build` except if it is excluded by a `.gitignore` file
+or because it is listed in `extend-exclude`.
+
+### `--format` is no longer a valid `rule` or `linter` command option
+
+Previously, `ruff rule` and `ruff linter` accepted the `--format <FORMAT>` option as an alias for `--output-format`. Ruff no longer
+supports this alias. Please use `ruff rule --output-format <FORMAT>` and `ruff linter --output-format <FORMAT>` instead.
+
+## 0.1.9
+
+### `site-packages` is now excluded by default ([#5513](https://github.com/astral-sh/ruff/pull/5513))
+
+Ruff maintains a list of default exclusions, which now consists of the following patterns:
+
+- `.bzr`
+- `.direnv`
+- `.eggs`
+- `.git-rewrite`
+- `.git`
+- `.hg`
+- `.ipynb_checkpoints`
+- `.mypy_cache`
+- `.nox`
+- `.pants.d`
+- `.pyenv`
+- `.pytest_cache`
+- `.pytype`
+- `.ruff_cache`
+- `.svn`
+- `.tox`
+- `.venv`
+- `.vscode`
+- `__pypackages__`
+- `_build`
+- `buck-out`
+- `build`
+- `dist`
+- `node_modules`
+- `site-packages`
+- `venv`
+
+Previously, the `site-packages` directory was not excluded by default. While `site-packages` tends
+to be excluded anyway by virtue of the `.venv` exclusion, this may not be the case when using Ruff
+from VS Code outside a virtual environment.
+
 ## 0.1.0
 
 ### The deprecated `format` setting has been removed
@@ -21,7 +196,7 @@ flag or `unsafe-fixes` configuration option can be used to enable unsafe fixes.
 
 See the [docs](https://docs.astral.sh/ruff/configuration/#fix-safety) for details.
 
-### Remove formatter-conflicting rules from the default rule set  ([#7900](https://github.com/astral-sh/ruff/pull/7900))
+### Remove formatter-conflicting rules from the default rule set ([#7900](https://github.com/astral-sh/ruff/pull/7900))
 
 Previously, Ruff enabled all implemented rules in Pycodestyle (`E`) by default. Ruff now only includes the
 Pycodestyle prefixes `E4`, `E7`, and `E9` to exclude rules that conflict with automatic formatters. Consequently,

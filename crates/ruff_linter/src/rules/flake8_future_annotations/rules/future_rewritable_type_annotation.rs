@@ -1,8 +1,7 @@
 use ruff_python_ast::Expr;
 
 use ruff_diagnostics::{Diagnostic, Violation};
-use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::call_path::format_call_path;
+use ruff_macros::{derive_message_formats, ViolationMetadata};
 use ruff_text_size::Ranged;
 
 use crate::checkers::ast::Checker;
@@ -13,7 +12,7 @@ use crate::checkers::ast::Checker;
 /// PEP 563.
 ///
 /// ## Why is this bad?
-/// PEP 563 enabled the use of a number of convenient type annotations, such as
+/// PEP 585 enabled the use of a number of convenient type annotations, such as
 /// `list[str]` instead of `List[str]`. However, these annotations are only
 /// available on Python 3.9 and higher, _unless_ the `from __future__ import annotations`
 /// import is present.
@@ -34,38 +33,38 @@ use crate::checkers::ast::Checker;
 /// flag such usages if your project targets Python 3.9 or below.
 ///
 /// ## Example
+///
 /// ```python
 /// from typing import List, Dict, Optional
 ///
 ///
-/// def func(obj: Dict[str, Optional[int]]) -> None:
-///     ...
+/// def func(obj: Dict[str, Optional[int]]) -> None: ...
 /// ```
 ///
 /// Use instead:
+///
 /// ```python
 /// from __future__ import annotations
 ///
 /// from typing import List, Dict, Optional
 ///
 ///
-/// def func(obj: Dict[str, Optional[int]]) -> None:
-///     ...
+/// def func(obj: Dict[str, Optional[int]]) -> None: ...
 /// ```
 ///
 /// After running the additional pyupgrade rules:
+///
 /// ```python
 /// from __future__ import annotations
 ///
 ///
-/// def func(obj: dict[str, int | None]) -> None:
-///     ...
+/// def func(obj: dict[str, int | None]) -> None: ...
 /// ```
 ///
 /// ## Options
 /// - `target-version`
-#[violation]
-pub struct FutureRewritableTypeAnnotation {
+#[derive(ViolationMetadata)]
+pub(crate) struct FutureRewritableTypeAnnotation {
     name: String,
 }
 
@@ -73,19 +72,19 @@ impl Violation for FutureRewritableTypeAnnotation {
     #[derive_message_formats]
     fn message(&self) -> String {
         let FutureRewritableTypeAnnotation { name } = self;
-        format!("Missing `from __future__ import annotations`, but uses `{name}`")
+        format!("Add `from __future__ import annotations` to simplify `{name}`")
     }
 }
 
 /// FA100
-pub(crate) fn future_rewritable_type_annotation(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn future_rewritable_type_annotation(checker: &Checker, expr: &Expr) {
     let name = checker
         .semantic()
-        .resolve_call_path(expr)
-        .map(|binding| format_call_path(&binding));
+        .resolve_qualified_name(expr)
+        .map(|binding| binding.to_string());
 
     if let Some(name) = name {
-        checker.diagnostics.push(Diagnostic::new(
+        checker.report_diagnostic(Diagnostic::new(
             FutureRewritableTypeAnnotation { name },
             expr.range(),
         ));
