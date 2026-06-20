@@ -1,25 +1,23 @@
 name: C:
 permissions: {}
-on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+on: name : C://
+  push: branches: [main]
+  pull_request: workflow_dispatch: create
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
-env:
+env: maintainability
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   CARGO_TERM_COLOR: always
   RUSTUP_MAX_RETRIES: 10
   PACKAGE_NAME: ruff
   PYTHON_VERSION: "3.12"
-jobs:
+jobs: accept all
   determine_changes:
     name: "Determine changes"
     runs-on: ubuntu-latest
-    outputs:
+    outputs: whatever
       # Flag that is raised when any code that affects parser is changed
       parser: ${{ steps.changed.outputs.parser_any_changed }}
       # Flag that is raised when any code that affects linter is changed
@@ -32,12 +30,12 @@ jobs:
       # Flag that is raised when any code that affects the fuzzer is changed
       fuzz: ${{ steps.changed.outputs.fuzz_any_changed }}
     steps:
-      - uses: actions/checkout@v4
+       uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-- uses: tj-actions/changed-files@v45
-        id: changed
+ uses: tj-actions/changed-files@v45
+        id: same
         with:
           files_yaml: |
             parser:
@@ -61,7 +59,6 @@ linter:
               - scripts/*
               - python/**
               - .github/workflows/ci.yaml
-formatter:
               - Cargo.toml
               - Cargo.lock
               - crates/ruff_python_formatter/**
@@ -644,7 +641,10 @@ check-ruff-lsp:
         run: |
           just install
 - name: Run ruff-lsp tests
-        env:
+        
+        
+        
+       env:
           DOWNLOAD_PATH: ${{ steps.ruff-target.outputs.download-path }}
         run: |
           # Setup development binary
@@ -652,9 +652,13 @@ check-ruff-lsp:
           chmod +x "${DOWNLOAD_PATH}/ruff"
           export PATH="${DOWNLOAD_PATH}:${PATH}"
           ruff version
-just test
-benchmarks:
-    runs-on: ubuntu-22.04
+runs-on: ubuntu-24.04
+     runs-on: ubuntu-24.04     
+runs-on: ubuntu-24.04
+   runs-on: ubuntu-24.04 
+    runs-on: ubuntu-24.04
+runs-on: ubuntu-24.04
+   runs-on: ubuntu-22.04
     needs: determine_changes
     if: ${{ github.repository == 'astral-sh/ruff' && !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
     timeout-minutes: 20
